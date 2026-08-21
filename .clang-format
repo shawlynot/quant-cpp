@@ -1,0 +1,16 @@
+---
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+
+# Google style is 2-space indent, 80-column limit. Override here if you
+# want something roomier, e.g. ColumnLimit: 100.
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 80
+AccessModifierOffset: -1
+
+# Keep #include grouping stable for this project's layout.
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup

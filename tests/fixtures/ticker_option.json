@@ -1,0 +1,44 @@
+{
+  "jsonrpc": "2.0",
+  "method": "subscription",
+  "params": {
+    "channel": "ticker.BTC-25SEP26-98000-C.100ms",
+    "data": {
+      "timestamp": 1787170728407,
+      "state": "open",
+      "stats": {
+        "high": 0.001,
+        "low": 0.0004,
+        "price_change": 150.0,
+        "volume": 14.2,
+        "volume_usd": 866.32
+      },
+      "greeks": {
+        "delta": 0.01701,
+        "gamma": 0.0,
+        "vega": 9.1755,
+        "theta": -6.38946,
+        "rho": 1.10559
+      },
+      "index_price": 68553.5,
+      "instrument_name": "BTC-25SEP26-98000-C",
+      "last_price": 0.001,
+      "settlement_price": 0.00024948,
+      "min_price": 0.0001,
+      "max_price": 0.0155,
+      "open_interest": 359.6,
+      "mark_price": 0.0009,
+      "interest_rate": 0.0,
+      "estimated_delivery_price": 68553.5,
+      "best_ask_price": 0.001,
+      "best_bid_price": 0.0008,
+      "mark_iv": 50.82,
+      "bid_iv": 49.76,
+      "ask_iv": 51.3,
+      "underlying_price": 68817.55,
+      "underlying_index": "BTC-25SEP26",
+      "best_ask_amount": 0.1,
+      "best_bid_amount": 20.7
+    }
+  }
+}

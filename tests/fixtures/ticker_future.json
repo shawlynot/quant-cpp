@@ -1,0 +1,32 @@
+{
+  "jsonrpc": "2.0",
+  "method": "subscription",
+  "params": {
+    "channel": "ticker.BTC-20AUG26.100ms",
+    "data": {
+      "timestamp": 1787170728407,
+      "state": "open",
+      "stats": {
+        "high": 68827.5,
+        "low": 64127.5,
+        "price_change": 6.137,
+        "volume": 296.23521264,
+        "volume_usd": 20016180.0,
+        "volume_notional": 20016180.0
+      },
+      "index_price": 68553.5,
+      "instrument_name": "BTC-20AUG26",
+      "last_price": 68530.0,
+      "settlement_price": 64255.66,
+      "min_price": 67482.5,
+      "max_price": 69540.0,
+      "open_interest": 5624670,
+      "mark_price": 68512.11,
+      "estimated_delivery_price": 68553.5,
+      "best_ask_price": 68525.0,
+      "best_bid_price": 68500.0,
+      "best_ask_amount": 25010.0,
+      "best_bid_amount": 58410.0
+    }
+  }
+}

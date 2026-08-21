@@ -1,0 +1,17 @@
+build/
+build-debug/
+.cache/
+compile_commands.json
+.claude/docs_private/
+
+# python
+py/.venv/
+py/**/__pycache__/
+py/**/*.pyc
+py/**/*.pyo
+py/.pytest_cache/
+py/**/*.egg-info/
+
+.mcp.json
+
+.env

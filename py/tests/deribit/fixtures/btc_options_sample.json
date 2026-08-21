@@ -1,0 +1,76 @@
+[
+  {
+    "state": "open",
+    "price_index": "btc_usd",
+    "kind": "option",
+    "instrument_name": "BTC-19AUG26-56000-C",
+    "maker_commission": 0.0003,
+    "taker_commission": 0.0003,
+    "instrument_type": "reversed",
+    "expiration_timestamp": 1787126400000,
+    "instrument_id": 674989,
+    "underlying_type": "crypto",
+    "product_group": "BTC",
+    "creation_timestamp": 1786780817000,
+    "is_active": true,
+    "contract_size": 1.0,
+    "tick_size": 0.0001,
+    "strike": 56000.0,
+    "counter_currency": "USD",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "settlement_currency": "BTC",
+    "option_type": "call",
+    "min_trade_amount": 0.1,
+    "block_trade_commission": 0.0003,
+    "block_trade_min_trade_amount": 25,
+    "block_trade_tick_size": 0.0001,
+    "settlement_period": "day",
+    "index_id": 1000033,
+    "tick_size_steps": [
+      {
+        "tick_size": 0.0005,
+        "above_price": 0.005
+      }
+    ],
+    "base_currency_uuid": "5b71fc48-3dd3-540c-809b-f8c94d0e68b5",
+    "quote_currency_uuid": "5b71fc48-3dd3-540c-809b-f8c94d0e68b5"
+  },
+  {
+    "state": "open",
+    "price_index": "btc_usd",
+    "kind": "option",
+    "instrument_name": "BTC-19AUG26-56000-P",
+    "maker_commission": 0.0003,
+    "taker_commission": 0.0003,
+    "instrument_type": "reversed",
+    "expiration_timestamp": 1787126400000,
+    "instrument_id": 674990,
+    "underlying_type": "crypto",
+    "product_group": "BTC",
+    "creation_timestamp": 1786780817000,
+    "is_active": true,
+    "contract_size": 1.0,
+    "tick_size": 0.0001,
+    "strike": 56000.0,
+    "counter_currency": "USD",
+    "base_currency": "BTC",
+    "quote_currency": "BTC",
+    "settlement_currency": "BTC",
+    "option_type": "put",
+    "min_trade_amount": 0.1,
+    "block_trade_commission": 0.0003,
+    "block_trade_min_trade_amount": 25,
+    "block_trade_tick_size": 0.0001,
+    "settlement_period": "day",
+    "index_id": 1000033,
+    "tick_size_steps": [
+      {
+        "tick_size": 0.0005,
+        "above_price": 0.005
+      }
+    ],
+    "base_currency_uuid": "5b71fc48-3dd3-540c-809b-f8c94d0e68b5",
+    "quote_currency_uuid": "5b71fc48-3dd3-540c-809b-f8c94d0e68b5"
+  }
+]
