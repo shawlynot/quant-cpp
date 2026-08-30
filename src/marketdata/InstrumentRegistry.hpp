@@ -59,10 +59,10 @@ class InstrumentRegistry {
   /// the spot index first, then dated futures, then options.
   ///
   /// Spot and the futures are tiny -- one channel plus under ten -- so they
-  /// fit inside the first chunk with room to spare, and spot is the reference
-  /// every option tick carries. Subscribing them last would leave the first
-  /// seconds of option ticks published with no index behind them, a startup
-  /// transient not worth having.
+  /// survive the session's channel cap with room to spare, and spot is the
+  /// reference every option tick carries. Ordering them last would both leave
+  /// the first seconds of option ticks published with no index behind them
+  /// and put them at the end that a truncation discards.
   ///
   /// The perpetual is never included, whatever a stray row might say.
   std::vector<std::string> subscription_channels(

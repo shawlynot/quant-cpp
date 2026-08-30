@@ -16,9 +16,9 @@ using namespace shawlynot::quant::marketdata;
 namespace {
 
 /// A transport that never touches a socket: it records what the session sent
-/// and lets a test feed frames back. This is what the JsonRpcSession /
-/// DeribitSession split buys -- the whole auth -> heartbeat -> prime ->
-/// subscribe -> reconnect sequence is drivable with no network.
+/// and lets a test feed frames back. This is what the ITransport seam buys --
+/// the whole auth -> heartbeat -> prime -> subscribe -> reconnect sequence is
+/// drivable with no network.
 class FakeTransport : public ITransport {
  public:
   struct Request {
@@ -178,7 +178,7 @@ InstrumentRow row(InstrumentId id, std::string symbol, std::string type) {
 
 /// Test harness: session plus everything it writes into.
 struct Harness {
-  Harness() {
+  explicit Harness(std::size_t max_channels = 8) {
     registry = std::make_shared<InstrumentRegistry>();
     for (const InstrumentRow& r :
          {row(1, "btc_usd", "currency"), row(2, "BTC-26JUN26", "future"),
@@ -189,8 +189,7 @@ struct Harness {
     config.client_id = "test-id";
     config.client_secret = "test-secret";
     config.interval = "100ms";
-    config.subscribe_chunk_size = 2;
-    config.subscribe_interval = std::chrono::milliseconds{1};
+    config.max_channels = max_channels;
     config.backoff_min = std::chrono::milliseconds{1};
     config.backoff_max = std::chrono::milliseconds{2};
 
@@ -260,7 +259,7 @@ struct Harness {
   }
 
   void complete_subscribes() {
-    // Confirm every chunk by echoing back exactly what was requested, which
+    // Confirm the subscribe by echoing back exactly what was requested, which
     // is what the venue does on success.
     for (std::size_t round = 0; round < 8; ++round) {
       const auto ids = pending_ids("public/subscribe");
@@ -348,16 +347,30 @@ TEST(DeribitSession, ReachesStreamingAndSubscribesEveryChannel) {
   EXPECT_EQ(requested, h.registry->subscription_channels("100ms"));
 }
 
-TEST(DeribitSession, ChunksSubscribesRatherThanSendingOneHugeRequest) {
-  Harness h;  // chunk size 2, three channels
+TEST(DeribitSession, SubscribesInOneRequest) {
+  Harness h;
   h.reach_streaming();
 
-  EXPECT_EQ(h.transport->count_of("public/subscribe"), 2u);
-  for (const auto& request : h.transport->sent) {
-    if (request.method == "public/subscribe") {
-      EXPECT_LE(request.params.at("channels").as_array().size(), 2u);
-    }
-  }
+  EXPECT_EQ(h.transport->count_of("public/subscribe"), 1u);
+}
+
+TEST(DeribitSession, TruncatesTheUniverseToTheChannelCap) {
+  // The cap is honoured by dropping the tail of the list -- options first,
+  // since spot and futures are ordered ahead of them -- not by splitting the
+  // subscribe across several requests.
+  Harness h{2};
+  h.reach_streaming();
+
+  ASSERT_EQ(h.transport->count_of("public/subscribe"), 1u);
+  const auto* const request = h.transport->last_of("public/subscribe");
+  ASSERT_NE(request, nullptr);
+  const auto& channels = request->params.at("channels").as_array();
+  ASSERT_EQ(channels.size(), 2u);
+
+  const auto all = h.registry->subscription_channels("100ms");
+  ASSERT_GE(all.size(), 2u);
+  EXPECT_EQ(channels.at(0).as_string(), all[0]);
+  EXPECT_EQ(channels.at(1).as_string(), all[1]);
 }
 
 TEST(DeribitSession, RecordsChannelsThatWereRequestedButNotConfirmed) {
@@ -623,4 +636,26 @@ TEST(DeribitSession, StopHaltsReconnection) {
 
   EXPECT_EQ(h.transport->connect_attempts, attempts);
   EXPECT_EQ(h.session->state(), SessionState::Disconnected);
+}
+
+/// Regression: the handler a session stores on the layer below it must not own
+/// the layer above. The transport holds the read handler for the life of the
+/// connection -- and, as here, past the session's own stop() -- so
+/// `DeribitSession -> ITransport -> read handler -> DeribitSession` was a
+/// cycle, and every reconnect stranded a whole object graph, socket included.
+TEST(DeribitSession, StopReleasesTheWholeSessionGraph) {
+  std::weak_ptr<DeribitSession> weak;
+  {
+    Harness h;
+    h.reach_streaming();
+    weak = h.session;
+
+    h.session->stop();
+    h.pump();
+    h.session.reset();
+    h.pump();
+
+    EXPECT_TRUE(weak.expired())
+        << "the transport's stored read handler must not own the session";
+  }
 }

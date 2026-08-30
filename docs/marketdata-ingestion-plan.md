@@ -50,7 +50,7 @@ Verified against `docs.deribit.com` rather than recalled:
   - Perpetual-only: `current_funding`, `funding_8h`, `interest_value` — out of scope; `BTC-PERPETUAL` is neither ingested nor subscribed (§7.1).
   - A **future's** ticker carries no `greeks` and no `mark_iv`/`bid_iv`/`ask_iv`; those are options-only.
 - **`public/get_instruments`** takes `kind` ∈ {`future`, `option`, `spot`, `future_combo`, `option_combo`}. **`kind=future` returns dated futures *and* the perpetual**; they are separated by `settlement_period` — `"month"`/`"week"` for dated, `"perpetual"` for `BTC-PERPETUAL`. Filter on that field, not on the name: `BTC-PERPETUAL` is excluded everywhere in this design (§7.1), and name-matching would miss a future whose symbol convention changes.
-- **`public/subscribe`** takes `channels: string[]` and returns the array of channels actually subscribed. The docs do **not** publish a hard per-request channel cap — so treat the cap as unknown, chunk conservatively (§8), and always reconcile the returned array against what was requested.
+- **`public/subscribe`** takes `channels: string[]` and returns the array of channels actually subscribed. The docs do **not** publish a hard per-request channel cap — so treat the cap as unknown, keep the subscribed universe small enough that one request is comfortably under it (§8), and always reconcile the returned array against what was requested.
 
 - **`deribit_price_index.{index_name}`** — the underlying spot index. **No interval suffix**, public, and the payload is just three fields:
   ```json
@@ -73,7 +73,7 @@ Verified against `docs.deribit.com` rather than recalled:
 
 | Concern | Choice | Why |
 |---|---|---|
-| WebSocket + TLS | **Boost.Beast** over **Boost.Asio** + **OpenSSL** | Already installed (Boost 1.83, OpenSSL 3.0), header-only, and it is the choice `quant-architecture.md` §12 already commits to. Gives full control of the event loop, which matters because heartbeat replies, token refresh, and subscribe pacing all need timers on the same executor as the socket. |
+| WebSocket + TLS | **Boost.Beast** over **Boost.Asio** + **OpenSSL** | Already installed (Boost 1.83, OpenSSL 3.0), header-only, and it is the choice `quant-architecture.md` §12 already commits to. Gives full control of the event loop, which matters because heartbeat replies, token refresh, and the staleness watchdog all need timers on the same executor as the socket. |
 | JSON parsing | **Boost.JSON** now, `simdjson` later | Already found and linked by CMake, so zero new dependency. Use `boost::json::stream_parser` with a reusable `boost::json::monotonic_resource` so per-message parsing does no heap allocation. Keep parsing behind `TickerCodec` (§5) so swapping in `simdjson::ondemand` is a one-file change when tick volume justifies it. |
 | Timers, backoff, refresh | `boost::asio::steady_timer` | Same executor as the socket ⇒ no cross-thread synchronization needed. |
 | Config / secrets | **`std::getenv`, nothing more** | The process environment is the interface; *populating* it is a platform concern (systemd `EnvironmentFile`, container env, `direnv`, or a shell that sourced `.env`). The gateway reads and validates, and owns no file format. |
@@ -97,7 +97,7 @@ Verified against `docs.deribit.com` rather than recalled:
 
 Two consequences to design around explicitly:
 
-1. **Beast permits exactly one in-flight `async_write` per stream.** With auth, heartbeat replies, and chunked subscribes all wanting to write, an outbound **write queue** is mandatory: `std::deque<std::string>`, push and start the write only if the queue was empty, and chain the next write from the completion handler. Getting this wrong produces intermittent, load-dependent corruption that is miserable to debug.
+1. **Beast permits exactly one in-flight `async_write` per stream.** With auth, heartbeat replies, and the subscribe all wanting to write, an outbound **write queue** is mandatory: `std::deque<std::string>`, push and start the write only if the queue was empty, and chain the next write from the completion handler. Getting this wrong produces intermittent, load-dependent corruption that is miserable to debug.
 2. **No expensive work on the read loop.** Parsing a ticker message is cheap and stays inline, and with no tick store to write through (§5.4) decode → guard → sink is the entire inline path. Anything heavier (persistence, Protobuf encode + publish) is handed to a consumer thread through the bounded queue in `src/queue/`, so a slow sink can never stall the socket or delay a `test_request` reply.
 
 **The queue is a plain `std::mutex` + `std::condition_variable` + `std::deque`** — no lock-free structure for now. At Deribit's tick rates a few hundred instruments produce thousands of messages per second, not millions, and an uncontended mutex acquisition costs tens of nanoseconds against a budget of hundreds of microseconds. A lock-free SPSC ring is a later optimization (see §5.5), taken when a measurement asks for it rather than on principle.
@@ -113,14 +113,14 @@ src/core/Log.hpp                          spdlog facade (async sink, one include
 src/marketdata/model.{hpp,cpp}            <-- the POD Tick, enums, symbol parsing
 src/marketdata/InstrumentRepository.{hpp,cpp} one startup SELECT from security_master
 src/marketdata/InstrumentRegistry.{hpp,cpp}   symbol <-> ids, built from the repository
-src/marketdata/JsonRpcSession.{hpp,cpp}   WS + TLS + JSON-RPC correlation (venue-agnostic)
-src/marketdata/deribit.{hpp,cpp}          DeribitSession: auth, heartbeat, subscribe, dispatch
+src/marketdata/WebSocketTransport.{hpp,cpp}   ITransport + Beast WS over TLS, write queue
+src/marketdata/deribit.{hpp,cpp}          DeribitSession: JSON-RPC correlation, auth, heartbeat, subscribe, dispatch
 src/marketdata/TickerCodec.{hpp,cpp}      params.data -> Tick
 src/marketdata/TickSink.hpp               ITickSink: where normalized ticks go
 src/queue/BlockingQueue.hpp               bounded mutex/condvar handoff to the sink thread (phase 4)
 ```
 
-The split that matters most is **`JsonRpcSession` vs `DeribitSession`**. The first knows about WebSockets, TLS, framing, request ids, timeouts, and the write queue — nothing about Deribit. The second knows about `public/auth`, `expires_in`, `test_request`, and channel names — nothing about sockets. That boundary is what makes the whole thing unit-testable: a `FakeTransport` satisfying `JsonRpcSession`'s interface lets you drive the entire auth → heartbeat → subscribe → reconnect state machine in a GoogleTest with no network.
+The split that matters most is **`ITransport` vs `DeribitSession`**. The transport knows about WebSockets, TLS, framing, and the write queue — it moves text frames and knows nothing about what is inside them. `DeribitSession` owns everything above that line: JSON-RPC request ids, the pending-call map and its timeouts, and the venue itself — `public/auth`, `expires_in`, `test_request`, channel names. That one seam is what makes the whole thing unit-testable: a `FakeTransport` satisfying `ITransport` lets you drive the entire auth → heartbeat → subscribe → reconnect state machine in a GoogleTest with no network. There is no venue-agnostic session type in between: correlation and the state machine share every piece of state they touch (the socket, the request ids, the reconnect), and separating them bought two hop-through handler layers rather than a second implementation.
 
 ### 5.1 `model.hpp` — the data model
 
@@ -233,26 +233,15 @@ The alternative, and what this design used to do, was to carry a *second* dense 
 
 **Why NaN and not 0 for nulls:** `best_bid_price` is genuinely `null` when there are no bids, which is routine on far-OTM crypto strikes. A zero there silently becomes a bid of zero and poisons a fit; a NaN propagates visibly and gets filtered at the fitter's OTM/vega stage.
 
-### 5.2 `JsonRpcSession`
+### 5.2 `WebSocketTransport` and the JSON-RPC layer
+
+`ITransport` is the only seam below the session: `async_connect`, `send`, `start_reading`, `close`, `is_open`. `WebSocketTransport` implements it over Beast — TLS, the WebSocket handshake, and an outbound queue that serializes writes, since Beast permits exactly one in-flight `async_write` per stream and auth, heartbeat replies and the subscribe all want to write at once.
+
+JSON-RPC correlation lives inside `DeribitSession`:
 
 ```cpp
-class JsonRpcSession {
-public:
-    using ResponseHandler     = std::function<void(boost::system::error_code,
-                                                   const boost::json::value& result)>;
-    using NotificationHandler = std::function<void(std::string_view channel,
-                                                   const boost::json::object& data)>;
-    using MethodHandler       = std::function<void(std::string_view method,
-                                                   const boost::json::object& params)>;
-
-    void async_connect(std::string host, std::string port, std::string target,
-                       std::function<void(boost::system::error_code)> on_ready);
-    std::uint64_t call(std::string_view method, boost::json::object params,
-                       ResponseHandler, std::chrono::milliseconds timeout);
-    void on_notification(NotificationHandler);   // method == "subscription"
-    void on_method(MethodHandler);               // e.g. method == "heartbeat"
-    void close();
-};
+std::uint64_t call(std::string_view method, boost::json::object params,
+                   ResponseHandler);   // deadline from Config::request_timeout
 ```
 
 Inbound dispatch classifies each frame into one of four shapes:
@@ -261,8 +250,8 @@ Inbound dispatch classifies each frame into one of four shapes:
 |---|---|
 | `{"id":N,"result":…}` | look up `N`, cancel its timeout, invoke handler |
 | `{"id":N,"error":{"code","message"}}` | same, with the error code mapped to an `error_code` |
-| `{"method":"subscription","params":{"channel","data"}}` | notification handler |
-| `{"method":"heartbeat","params":{"type":…}}` | method handler → `DeribitSession` |
+| `{"method":"subscription","params":{"channel","data"}}` | `handle_notification` → codec → sink |
+| `{"method":"heartbeat","params":{"type":…}}` | `handle_method` → reply to `test_request` |
 
 Every outbound `call` gets a timeout timer. A response that never arrives must fail its handler rather than leak an entry in the pending map forever — otherwise a dropped-but-not-closed socket leaves the session wedged in `Authenticating` with no error surfaced.
 
@@ -302,7 +291,7 @@ Disconnected
        store access_token / refresh_token / expires_in; arm refresh timer at 0.75 * expires_in
   → public/set_heartbeat {interval: 30}
   → public/get_instruments (over the same socket) → build InstrumentRegistry
-  → public/subscribe, chunked and paced (§8)
+  → public/subscribe, one request capped at max_channels (§8)
   → Streaming
 ```
 
@@ -312,7 +301,7 @@ Three things worth being deliberate about:
 - **Auth binds to the WebSocket connection.** Once `public/auth` succeeds on the socket, subsequent calls on that socket are authenticated — the token does not need to be repeated per request. It follows that **a reconnect invalidates authentication**, so re-auth is not optional on the reconnect path.
 - **Refresh via `grant_type=refresh_token`** at 75 % of `expires_in`, on the live socket. If refresh fails, fall back to a full `client_credentials` auth; if *that* fails, tear down and enter the reconnect backoff rather than drifting on with an expired token.
 
-**Heartbeat handling** is the one piece with a hard deadline attached: on `params.type == "test_request"`, send `public/test` immediately, ahead of any queued subscribe chunks. Failure to respond drops the connection. `params.type == "heartbeat"` needs no reply — it exists so *you* can detect a silent peer.
+**Heartbeat handling** is the one piece with a hard deadline attached: on `params.type == "test_request"`, send `public/test` immediately, ahead of anything else queued. Failure to respond drops the connection. `params.type == "heartbeat"` needs no reply — it exists so *you* can detect a silent peer.
 
 ### 5.4 `ITickSink` — ticks go straight to the sink
 
@@ -456,14 +445,14 @@ New listings appear and expiries drop continuously, and with the registry loaded
 
 ---
 
-## 8. Subscribe chunking and pacing
+## 8. Subscribe scope and the channel cap
 
-A full active BTC option chain is several hundred instruments, so the subscribe path is where the rate limiter bites — and remember the penalty is **session termination**, not a soft rejection.
+A full active BTC option chain is several hundred instruments, so the subscribe path is where the rate limiter would bite — and remember the penalty is **session termination**, not a soft rejection. `public/subscribe` costs 3,000 credits against a 50,000 pool refilling at 10,000/s (burst 10, sustained ~3.3/s).
 
-Given `public/subscribe` costs 3,000 credits against a 50,000 pool refilling at 10,000/s (burst 10, sustained ~3.3/s):
+The chosen answer is to **cap the universe rather than pace the requests**: subscribe in a **single `public/subscribe`** carrying at most `max_channels` channels (**200** by default, configurable on `DeribitSession::Config`). One call cannot breach the credit budget, so there is no token bucket, no inter-chunk timer, and no pacing bug to have — the whole class of failure the pacing existed to avoid is designed out instead of managed. 200 also stays well clear of any undocumented per-request channel cap.
 
-- Chunk the channel list into batches of **200** channels per request. Small enough to stay well clear of any undocumented per-request cap; few enough requests that the whole chain subscribes in a couple of seconds.
-- Pace with a **client-side token bucket mirroring the server's** — cap at 3 subscribe calls/second. Do not fire chunks back to back and hope.
+- **Truncation drops from the tail.** `subscription_channels()` orders spot → dated futures → options, so a universe over the cap loses the far end of the option chain and never the index every option tick is read against. The session logs both counts (offered and subscribed) when it truncates, so a silently narrowed surface is visible at startup.
+- **The cost, stated plainly:** with a full BTC chain this means part of the chain is *not* subscribed. That is the deliberate trade for now — the fitter is exercised on a liquid subset, and the cap is one config field to raise. If the whole chain is ever genuinely needed, the honest fix is a wider cap plus a measured per-request limit, not a return to paced chunking.
 - **Reconcile the result.** `public/subscribe` returns the channels actually subscribed. Diff it against what was requested and log/retry the difference; a silently partial subscription is a hole in the surface that shows up much later as a stale expiry.
 - Handle `10028 too_many_requests` as a **connection-fatal** event: back off and reconnect, since the session is being torn down anyway.
 
@@ -471,7 +460,7 @@ Given `public/subscribe` costs 3,000 credits against a 50,000 pool refilling at 
 
 **The index channel has no interval and is not subject to this choice** — `deribit_price_index.btc_usd` pushes at its own rate.
 
-**Subscribe spot and futures first, options after.** Both are tiny — one channel plus under ten — so they fit inside the first chunk with room to spare, and spot is the reference every option tick carries. Subscribing them last means the first seconds of option ticks are published with no index behind them, which is a startup transient you simply do not need to have.
+**Subscribe spot and futures first, options after.** Both are tiny — one channel plus under ten — so they survive any truncation with room to spare, and spot is the reference every option tick carries. Subscribing them last would mean the first seconds of option ticks are published with no index behind them, which is a startup transient you simply do not need to have.
 
 ---
 
@@ -483,7 +472,7 @@ Consolidating `quant-architecture.md` §3.3 into concrete mechanisms:
 |---|---|
 | Silent half-open connection | Heartbeat: server `test_request` → immediate `public/test`. Independently, a watchdog timer that fires if no frame of any kind arrives within 2× the heartbeat interval forces a reconnect. |
 | Disconnect / handshake failure | Exponential backoff **250 ms → 30 s with full jitter**. Full jitter, not fixed steps — it prevents a synchronized reconnect storm if several processes drop together. |
-| Reconnect | Re-auth (auth does not survive the socket) → re-`set_heartbeat` → re-`get_instruments` → re-subscribe chunked → resume. The gateway caches nothing to invalidate, so what it owes on the way down is the signal: `on_feed_state(STALE)` to the sink (§5.4). |
+| Reconnect | Re-auth (auth does not survive the socket) → re-`set_heartbeat` → re-`get_instruments` → re-subscribe → resume. The gateway caches nothing to invalidate, so what it owes on the way down is the signal: `on_feed_state(STALE)` to the sink (§5.4). |
 | Token expiry | Refresh at 0.75 × `expires_in`; on failure, full re-auth; on repeat failure, drop into the reconnect path. |
 | Out-of-order / duplicate ticks | `ticker` carries no sequence number. `DeribitSession` keeps the last `exchange_ts` per instrument — a timestamp, not a cached tick (§5.4) — and **drops any tick whose timestamp does not advance**, counting the rejections in `out_of_order_count()`. |
 | Stale feed | Every `Tick` carries `recv_ts`. A consumer detects staleness itself; the gateway additionally emits a `feed_state = STALE` control message when the circuit breaker trips, so downstream holds last-good rather than republishing garbage. This is the *only* staleness mechanism now — with no store there are no cached slots to flag (§5.4), and the consumer holding the last-good price is the one told. **Watch spot and the futures specifically**: a quiet channel is indistinguishable from a broken one on payload alone, and a stale spot or a stale future is published as a live price that whatever consumes it will price a whole expiry off, rather than corrupting one instrument. |
@@ -512,7 +501,7 @@ add_library(quant_marketdata STATIC
     src/marketdata/model.cpp
     src/marketdata/InstrumentRepository.cpp
     src/marketdata/InstrumentRegistry.cpp
-    src/marketdata/JsonRpcSession.cpp
+    src/marketdata/WebSocketTransport.cpp
     src/marketdata/deribit.cpp
     src/marketdata/TickerCodec.cpp
 )
@@ -546,7 +535,7 @@ Two smaller items:
 | Unit — future ticker | A dated-future `ticker` frame through the same codec and the same field; a future differs from an option only in which instrument its id resolves to |
 | Unit — `InstrumentRepository` | Row mapping from a fixture result set: `instrument_type` → `InstrumentKind`, `instrument_id` carried onto the key verbatim, a key with no id refused by `add`, a missing `option` join row on a future does not produce a bogus strike. Needs no live database |
 | Unit — `BlockingQueue` | Bounded capacity honoured; overflow drops the **oldest** and increments `dropped()`; `pop` blocks then wakes on push; `close()` releases a blocked consumer. Run the multi-threaded cases under TSan |
-| Unit — `DeribitSession` | Drive the full state machine over a `FakeTransport`: auth success/failure, refresh at threshold, refresh failure → re-auth, `test_request` → `public/test`, subscribe chunking, `10028` → reconnect, out-of-order tick dropped, an untraded strike publishing nothing, disconnect → `FeedState::Stale` reaches the sink, and **a spot tick carrying the `currency` row's `instrument_id`** (§7.2). A `RecordingSink` is the only place to assert a tick arrived, since the gateway keeps no copy of one |
+| Unit — `DeribitSession` | Drive the full state machine over a `FakeTransport`: auth success/failure, refresh at threshold, refresh failure → re-auth, `test_request` → `public/test`, a single subscribe truncated to the channel cap, `10028` → reconnect, out-of-order tick dropped, an untraded strike publishing nothing, disconnect → `FeedState::Stale` reaches the sink, and **a spot tick carrying the `currency` row's `instrument_id`** (§7.2). A `RecordingSink` is the only place to assert a tick arrived, since the gateway keeps no copy of one |
 | Integration | Against **testnet** (`test.deribit.com`) — connect, auth, subscribe one instrument, assert ticks arrive within N seconds. Tagged so it does not run in the default suite |
 | Soak | Multi-hour run against production public data, watching for descriptor leaks, unbounded pending-request map growth, and refresh-boundary behaviour (needs >1 token lifetime to be meaningful) |
 
@@ -562,7 +551,7 @@ Capture the fixtures during the M1 milestone — dump raw frames to a file behin
 | **M0** | `Config` + TLS/WS connect + `public/auth` | Connects to testnet and prints scope + `expires_in` (token itself redacted) |
 | **M1** | Heartbeat + `deribit_price_index.btc_usd` + one hardcoded option and one dated future `ticker` | Spot, one option and one future print for 10 minutes with no disconnect; raw frames of all three shapes captured as fixtures |
 | **M2** | `model.hpp` (`Tick`) + `TickerCodec` + unit tests | Fixtures parse; `last_price`/`price` selection, no-price rejection and ms→ns conversion asserted; tests link `quant_marketdata` |
-| **M3** | Full universe: `InstrumentRepository` load, `get_index_price` prime, registry, chunked+paced subscribe, ordering guard, reconnect, `get_instruments` cross-check | Whole BTC chain + dated futures + spot streaming off DB-sourced ids; the cross-check reports zero divergence against Deribit; survives a forced disconnect and re-establishes without manual intervention |
+| **M3** | Full universe: `InstrumentRepository` load, `get_index_price` prime, registry, capped single subscribe, ordering guard, reconnect, `get_instruments` cross-check | Whole BTC chain + dated futures + spot streaming off DB-sourced ids; the cross-check reports zero divergence against Deribit; survives a forced disconnect and re-establishes without manual intervention |
 | **M4** | `ITickSink` + `BlockingQueue` handoff | A separate consumer thread receives ticks with the io thread never blocking on capacity; `dropped()` exported and observed at zero under normal load; ready for the Protobuf/ZMQ publisher of `quant-architecture.md` §5 |
 
 M0–M2 are the ones that de-risk the design. M3 is mostly volume and bookkeeping; M4 is where this rejoins the broader CVP architecture.

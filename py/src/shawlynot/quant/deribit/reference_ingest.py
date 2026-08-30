@@ -4,8 +4,6 @@ Intended to be invoked repeatedly by an external scheduler (cron/systemd timer);
 each run does a single fetch-and-upsert pass, then exits.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import logging
@@ -81,9 +79,7 @@ async def run(settings: Settings) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="enable debug logging"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="enable debug logging")
     args = parser.parse_args(argv)
 
     logging.basicConfig(

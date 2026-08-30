@@ -63,7 +63,7 @@ add_library(quant_marketdata STATIC
     src/marketdata/TickerCodec.cpp
     src/marketdata/InstrumentRepository.cpp
     src/marketdata/InstrumentRegistry.cpp
-    src/marketdata/JsonRpcSession.cpp
+    src/marketdata/WebSocketTransport.cpp
     src/marketdata/deribit.cpp
 )
 target_include_directories(quant_marketdata PUBLIC src include)

@@ -20,7 +20,6 @@
 #include "marketdata/InstrumentRegistry.hpp"
 #include "marketdata/InstrumentRepository.hpp"
 #include "marketdata/QueueSink.hpp"
-#include "marketdata/deribit.hpp"
 
 namespace {
 
@@ -28,9 +27,11 @@ constexpr std::size_t kQueueCapacity = 65536;
 
 /// Build the registry from the startup SELECT, skipping rows that cannot be
 /// made sense of rather than failing the boot over one bad listing.
-std::shared_ptr<shawlynot::quant::marketdata::InstrumentRegistry> build_registry(
+std::shared_ptr<shawlynot::quant::marketdata::InstrumentRegistry>
+build_registry(
     const std::vector<shawlynot::quant::marketdata::InstrumentRow>& rows) {
-  auto registry = std::make_shared<shawlynot::quant::marketdata::InstrumentRegistry>();
+  auto registry =
+      std::make_shared<shawlynot::quant::marketdata::InstrumentRegistry>();
   std::size_t skipped = 0;
 
   for (const shawlynot::quant::marketdata::InstrumentRow& row : rows) {
@@ -56,9 +57,14 @@ std::shared_ptr<shawlynot::quant::marketdata::InstrumentRegistry> build_registry
   spdlog::info(
       "registry: {} instrument(s) ({} option, {} future, {} index), {} skipped",
       registry->size(),
-      registry->ids_of_kind(shawlynot::quant::marketdata::InstrumentKind::Option).size(),
-      registry->ids_of_kind(shawlynot::quant::marketdata::InstrumentKind::Future).size(),
-      registry->ids_of_kind(shawlynot::quant::marketdata::InstrumentKind::Index).size(),
+      registry
+          ->ids_of_kind(shawlynot::quant::marketdata::InstrumentKind::Option)
+          .size(),
+      registry
+          ->ids_of_kind(shawlynot::quant::marketdata::InstrumentKind::Future)
+          .size(),
+      registry->ids_of_kind(shawlynot::quant::marketdata::InstrumentKind::Index)
+          .size(),
       skipped);
   return registry;
 }
@@ -106,39 +112,6 @@ int main() {
   marketdata::QueueSink sink{kQueueCapacity};
   sink.start(
       [&console](const marketdata::Tick& tick) { console.on_tick(tick); });
-
-  boost::asio::io_context io;
-  boost::asio::ssl::context ssl{boost::asio::ssl::context::tlsv12_client};
-  ssl.set_default_verify_paths();
-  ssl.set_verify_mode(boost::asio::ssl::verify_peer);
-
-  marketdata::DeribitSession::Config session_config;
-  session_config.host = config.ws_host;
-  session_config.port = config.ws_port;
-  session_config.target = config.ws_target;
-  session_config.client_id = config.client_id;
-  session_config.client_secret = config.client_secret;
-  session_config.interval = config.ticker_interval;
-
-  auto session = std::make_shared<marketdata::DeribitSession>(
-      io.get_executor(), session_config,
-      [&io, &ssl] {
-        return std::static_pointer_cast<marketdata::ITransport>(
-            std::make_shared<marketdata::WebSocketTransport>(io.get_executor(),
-                                                             ssl));
-      },
-      registry, &sink);
-
-  boost::asio::signal_set signals{io, SIGINT, SIGTERM};
-  signals.async_wait(
-      [&session, &io](const boost::system::error_code&, int signal) {
-        spdlog::info("signal {} received, shutting down", signal);
-        session->stop();
-        io.stop();
-      });
-
-  session->start();
-  io.run();
 
   sink.stop();
   spdlog::info("gateway stopped ({} reconnect(s), {} dropped tick(s))",
