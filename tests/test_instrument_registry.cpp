@@ -1,247 +1,247 @@
+// Registry tests: identity in, subscription out.
+//
+// The interesting behaviour is all in subscription_channels: what gets
+// subscribed when the universe is larger than one request can carry, and in
+// what order. A cap that silently kept the wrong 200 channels would show up
+// much later as a surface with no usable smile anywhere.
+
 #include <gtest/gtest.h>
 
-#include <cmath>
+#include <algorithm>
+#include <chrono>
+#include <string>
 
 #include "marketdata/InstrumentRegistry.hpp"
-#include "marketdata/InstrumentRepository.hpp"
 
 using namespace shawlynot::quant::marketdata;
 
 namespace {
 
-/// A fixture result set -- the row mapping is a pure function, so none of this
-/// needs a live database.
-InstrumentRow option_row(InstrumentId id, std::string symbol,
-                         std::string option_type, double strike) {
-  InstrumentRow row;
-  row.instrument_id = id;
-  row.symbol = std::move(symbol);
-  row.instrument_type = "option";
-  row.option_type = std::move(option_type);
-  row.strike = strike;
-  row.expiration = Nanos{std::chrono::seconds{1782633600}};
-  return row;
+Nanos days(int n) { return Nanos{std::chrono::hours{24 * n}}; }
+
+/// "Now" for the subscription tests: expiries above this are live, below dead.
+const Nanos kNow = days(1);
+
+InstrumentKey index_key(InstrumentId id = 1) {
+  return InstrumentKey{.symbol = "btc_usd",
+                       .id = id,
+                       .kind = InstrumentKind::Index,
+                       .price_exponent = -2,
+                       .expiry = Nanos{}};
 }
 
-InstrumentRow future_row(InstrumentId id, std::string symbol) {
-  InstrumentRow row;
-  row.instrument_id = id;
-  row.symbol = std::move(symbol);
-  row.instrument_type = "future";
-  row.expiration = Nanos{std::chrono::seconds{1782633600}};
-  return row;
+InstrumentKey future_key(InstrumentId id, const std::string& symbol,
+                         int expiry_days) {
+  return InstrumentKey{.symbol = symbol,
+                       .id = id,
+                       .kind = InstrumentKind::Future,
+                       .price_exponent = -1,
+                       .expiry = days(expiry_days)};
 }
 
-InstrumentRow currency_row(InstrumentId id, std::string symbol) {
-  InstrumentRow row;
-  row.instrument_id = id;
-  row.symbol = std::move(symbol);
-  row.instrument_type = "currency";
-  return row;
+InstrumentKey option_key(InstrumentId id, const std::string& symbol,
+                         int expiry_days) {
+  return InstrumentKey{.symbol = symbol,
+                       .id = id,
+                       .kind = InstrumentKind::Option,
+                       .price_exponent = -4,
+                       .expiry = days(expiry_days)};
+}
+
+/// `count` options all sharing one expiry.
+void add_expiry(InstrumentRegistry& registry, InstrumentId first_id,
+                int expiry_days, int count) {
+  for (int i = 0; i < count; ++i) {
+    registry.add(option_key(first_id + i,
+                            "BTC-E" + std::to_string(expiry_days) + "-" +
+                                std::to_string(i) + "-C",
+                            expiry_days));
+  }
 }
 
 }  // namespace
 
-TEST(InstrumentRepository, MapsOptionRow) {
-  const auto key = to_instrument_key(
-      option_row(101, "BTC-26JUN26-100000-C", "call", 100000.0));
-
-  ASSERT_TRUE(key.has_value());
-  EXPECT_EQ(key->kind, InstrumentKind::Option);
-  EXPECT_EQ(key->id, 101);
-  EXPECT_EQ(key->right, OptionRight::Call);
-  EXPECT_DOUBLE_EQ(key->strike, 100000.0);
-}
-
-TEST(InstrumentRepository, MapsPutRow) {
-  const auto key =
-      to_instrument_key(option_row(102, "BTC-26JUN26-90000-P", "put", 90000.0));
-
-  ASSERT_TRUE(key.has_value());
-  EXPECT_EQ(key->right, OptionRight::Put);
-}
-
-TEST(InstrumentRepository, MapsFutureRow) {
-  const auto key = to_instrument_key(future_row(201, "BTC-26JUN26"));
-
-  ASSERT_TRUE(key.has_value());
-  EXPECT_EQ(key->kind, InstrumentKind::Future);
-  EXPECT_EQ(key->id, 201);
-}
-
-TEST(InstrumentRepository, MissingOptionJoinDoesNotGiveAFutureABogusStrike) {
-  // The startup SELECT LEFT JOINs `option`, so a future row's option columns
-  // are null. A 0 strike there would look like a real zero-strike instrument.
-  const auto key = to_instrument_key(future_row(201, "BTC-26JUN26"));
-
-  ASSERT_TRUE(key.has_value());
-  EXPECT_TRUE(std::isnan(key->strike));
-}
-
-TEST(InstrumentRepository, MapsCurrencyRowToTheIndex) {
-  const auto key = to_instrument_key(currency_row(301, "btc_usd"));
-
-  ASSERT_TRUE(key.has_value());
-  EXPECT_EQ(key->kind, InstrumentKind::Index);
-  EXPECT_EQ(key->id, 301);
-}
-
-TEST(InstrumentRepository, RejectsRowsWhoseTypeContradictsTheirSymbol) {
-  InstrumentRow row = future_row(202, "BTC-26JUN26-100000-C");
-  EXPECT_FALSE(to_instrument_key(row).has_value())
-      << "an option symbol typed as a future";
-
-  InstrumentRow perpetual = future_row(203, "BTC-PERPETUAL");
-  EXPECT_FALSE(to_instrument_key(perpetual).has_value())
-      << "a perpetual must never be subscribed";
-
-  InstrumentRow unknown =
-      option_row(204, "BTC-26JUN26-100000-C", "call", 100000.0);
-  unknown.instrument_type = "swaption";
-  EXPECT_FALSE(to_instrument_key(unknown).has_value());
-
-  InstrumentRow bad_right =
-      option_row(205, "BTC-26JUN26-100000-C", "straddle", 100000.0);
-  EXPECT_FALSE(to_instrument_key(bad_right).has_value());
-
-  InstrumentRow bad_symbol = option_row(206, "not-a-symbol", "call", 1.0);
-  EXPECT_FALSE(to_instrument_key(bad_symbol).has_value());
-}
-
-TEST(InstrumentRepository, DatabaseValuesWinOverTheSymbol) {
-  // The symbol carries the shape; the database carries the identity the rest
-  // of the platform joins against.
-  InstrumentRow row = option_row(107, "BTC-26JUN26-100000-C", "put", 99999.0);
-
-  const auto key = to_instrument_key(row);
-
-  ASSERT_TRUE(key.has_value());
-  EXPECT_DOUBLE_EQ(key->strike, 99999.0);
-  EXPECT_EQ(key->right, OptionRight::Put);
-}
-
-TEST(InstrumentRegistry, RegistersUnderTheSecurityMasterIdVerbatim) {
-  // security_master.instrument_id is a bigserial, so the live set is a sparse
-  // window up in the tens of thousands. The registry keeps those ids exactly
-  // as they are rather than renumbering: the id on a tick is the id the
-  // database, the Python layer and a published message all use.
-  InstrumentRegistry registry;
-  const auto a =
-      registry.add(*to_instrument_key(currency_row(90001, "btc_usd")));
-  const auto b =
-      registry.add(*to_instrument_key(future_row(90502, "BTC-26JUN26")));
-  const auto c = registry.add(*to_instrument_key(
-      option_row(97788, "BTC-26JUN26-100000-C", "call", 100000.0)));
-
-  EXPECT_EQ(a, 90001);
-  EXPECT_EQ(b, 90502);
-  EXPECT_EQ(c, 97788);
-  EXPECT_EQ(registry.size(), 3u);
-}
-
-TEST(InstrumentRegistry, ResolvesSparseIdsBothWays) {
-  InstrumentRegistry registry;
-  const auto id =
-      registry.add(*to_instrument_key(future_row(90502, "BTC-26JUN26")));
-  ASSERT_TRUE(id.has_value());
-
-  EXPECT_EQ(registry.by_symbol("BTC-26JUN26"), id);
-  EXPECT_FALSE(registry.by_symbol("BTC-NOTLISTED").has_value());
-  ASSERT_NE(registry.find(*id), nullptr);
-  EXPECT_EQ(registry.find(*id)->id, 90502);
-  EXPECT_EQ(registry.find(1), nullptr) << "a neighbouring id must not resolve";
-  EXPECT_EQ(registry.find(9999), nullptr);
+TEST(ChannelFor, TheIndexTakesNoIntervalSuffix) {
+  // Appending one fails the subscribe outright, so this is not cosmetic.
+  EXPECT_EQ(channel_for(index_key(), "100ms"), "deribit_price_index.btc_usd");
+  EXPECT_EQ(channel_for(future_key(2, "BTC-20AUG26", 5), "100ms"),
+            "ticker.BTC-20AUG26.100ms");
+  EXPECT_EQ(channel_for(option_key(3, "BTC-25SEP26-98000-C", 40), "agg2"),
+            "ticker.BTC-25SEP26-98000-C.agg2");
 }
 
 TEST(InstrumentRegistry, RefusesAnInstrumentWithNoSecurityMasterId) {
-  // A symbol parsed on its own has no id behind it. There is no dense id to
-  // fall back on any more, so registering it would mean inventing an
-  // identity -- which is exactly what one-id-only rules out.
   InstrumentRegistry registry;
-  auto orphan = parse_symbol("BTC-26JUN26-100000-C");
-  ASSERT_TRUE(orphan.has_value());
-  EXPECT_EQ(orphan->id, 0);
-
-  EXPECT_FALSE(registry.add(*orphan).has_value());
+  InstrumentKey orphan = index_key(0);
+  EXPECT_FALSE(registry.add(std::move(orphan)).has_value());
   EXPECT_EQ(registry.size(), 0u);
 }
 
-TEST(InstrumentRegistry, ReregisteringASymbolIsIdempotent) {
+TEST(InstrumentRegistry, ReRegisteringASymbolReturnsTheExistingId) {
   InstrumentRegistry registry;
-  const auto first =
-      registry.add(*to_instrument_key(future_row(1, "BTC-26JUN26")));
-  const auto second =
-      registry.add(*to_instrument_key(future_row(1, "BTC-26JUN26")));
-
-  EXPECT_EQ(first, second);
+  ASSERT_EQ(registry.add(index_key(7)), 7);
+  EXPECT_EQ(registry.add(index_key(7)), 7);
   EXPECT_EQ(registry.size(), 1u);
 }
 
-TEST(ChannelNaming, TickerChannelsCarryTheInterval) {
-  const auto option = to_instrument_key(
-      option_row(1, "BTC-26JUN26-100000-C", "call", 100000.0));
-  const auto future = to_instrument_key(future_row(2, "BTC-26JUN26"));
-
-  EXPECT_EQ(channel_for(*option, "100ms"), "ticker.BTC-26JUN26-100000-C.100ms");
-  EXPECT_EQ(channel_for(*future, "raw"), "ticker.BTC-26JUN26.raw");
-}
-
-TEST(ChannelNaming, IndexChannelTakesNoIntervalSuffix) {
-  // Appending one fails the subscribe -- the index is not a ticker channel.
-  const auto index = to_instrument_key(currency_row(3, "btc_usd"));
-
-  EXPECT_EQ(channel_for(*index, "100ms"), "deribit_price_index.btc_usd");
-}
-
-TEST(ChannelNaming, PerpetualHasNoChannel) {
-  InstrumentKey key;
-  key.symbol = "BTC-PERPETUAL";
-  key.kind = InstrumentKind::Perpetual;
-
-  EXPECT_TRUE(channel_for(key, "100ms").empty());
-}
-
-TEST(InstrumentRegistry, SubscribesSpotAndFuturesBeforeOptions) {
-  // Both are tiny, and spot is the reference every option tick carries;
-  // subscribing them last would leave the first seconds of option ticks
-  // published with no index behind them.
+TEST(InstrumentRegistry, SubscribingBindsEveryChannelForInboundRouting) {
+  // This is what lets dispatch route on the channel a frame arrived on instead
+  // of re-parsing instrument_name out of every payload.
   InstrumentRegistry registry;
-  registry.add(*to_instrument_key(
-      option_row(1, "BTC-26JUN26-100000-C", "call", 100000.0)));
-  registry.add(
-      *to_instrument_key(option_row(2, "BTC-26JUN26-90000-P", "put", 90000.0)));
-  registry.add(*to_instrument_key(future_row(3, "BTC-26JUN26")));
-  registry.add(*to_instrument_key(currency_row(4, "btc_usd")));
+  registry.add(index_key(1));
+  registry.add(future_key(2, "BTC-20AUG26", 5));
 
-  const auto channels = registry.subscription_channels("100ms");
+  EXPECT_FALSE(registry.by_channel("deribit_price_index.btc_usd").has_value())
+      << "nothing is routable before it is subscribed";
 
-  ASSERT_EQ(channels.size(), 4u);
-  EXPECT_EQ(channels[0], "deribit_price_index.btc_usd");
-  EXPECT_EQ(channels[1], "ticker.BTC-26JUN26.100ms");
-  EXPECT_EQ(channels[2], "ticker.BTC-26JUN26-100000-C.100ms");
-  EXPECT_EQ(channels[3], "ticker.BTC-26JUN26-90000-P.100ms");
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 50, kNow);
+  EXPECT_EQ(subscription.channels.size(), 2u);
+  EXPECT_EQ(registry.by_channel("deribit_price_index.btc_usd"), 1);
+  EXPECT_EQ(registry.by_channel("ticker.BTC-20AUG26.100ms"), 2);
 }
 
-TEST(InstrumentRegistry, RoutesNotificationsByBoundChannel) {
+TEST(InstrumentRegistry, IndexComesFirstThenFuturesThenOptions) {
+  // Spot is the reference every option tick is read against; subscribing it
+  // last would leave the first seconds of option ticks with no index behind
+  // them.
   InstrumentRegistry registry;
-  const auto id =
-      registry.add(*to_instrument_key(future_row(3, "BTC-26JUN26")));
-  ASSERT_TRUE(id.has_value());
-  registry.bind_channel("ticker.BTC-26JUN26.100ms", *id);
+  add_expiry(registry, 100, 7, 2);
+  registry.add(future_key(2, "BTC-20AUG26", 5));
+  registry.add(index_key(1));
 
-  EXPECT_EQ(registry.by_channel("ticker.BTC-26JUN26.100ms"), id);
-  EXPECT_FALSE(registry.by_channel("ticker.BTC-26JUN26.raw").has_value());
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 50, kNow);
+  ASSERT_EQ(subscription.channels.size(), 4u);
+  EXPECT_EQ(subscription.channels[0], "deribit_price_index.btc_usd");
+  EXPECT_EQ(subscription.channels[1], "ticker.BTC-20AUG26.100ms");
+  EXPECT_FALSE(subscription.truncated);
+  EXPECT_EQ(subscription.offered, 4u);
 }
 
-TEST(InstrumentRegistry, ListsIdsByKind) {
+TEST(InstrumentRegistry, FuturesAreOrderedNearestExpiryFirst) {
   InstrumentRegistry registry;
-  registry.add(*to_instrument_key(currency_row(1, "btc_usd")));
-  registry.add(*to_instrument_key(future_row(2, "BTC-26JUN26")));
-  registry.add(*to_instrument_key(
-      option_row(3, "BTC-26JUN26-100000-C", "call", 100000.0)));
+  registry.add(future_key(3, "BTC-FAR", 90));
+  registry.add(future_key(2, "BTC-NEAR", 5));
 
-  EXPECT_EQ(registry.ids_of_kind(InstrumentKind::Index).size(), 1u);
-  EXPECT_EQ(registry.ids_of_kind(InstrumentKind::Future).size(), 1u);
-  EXPECT_EQ(registry.ids_of_kind(InstrumentKind::Option).size(), 1u);
-  EXPECT_TRUE(registry.ids_of_kind(InstrumentKind::Perpetual).empty());
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 50, kNow);
+  ASSERT_EQ(subscription.channels.size(), 2u);
+  EXPECT_EQ(subscription.channels[0], "ticker.BTC-NEAR.100ms");
+  EXPECT_EQ(subscription.channels[1], "ticker.BTC-FAR.100ms");
+}
+
+TEST(InstrumentRegistry, OptionsAreAdmittedAWholeExpiryAtATime) {
+  // A fitter needs complete front expiries. An arbitrary slice across every
+  // expiry would give it a fragment of each and a usable smile for none, so
+  // the cap must cut between expiries rather than through one.
+  InstrumentRegistry registry;
+  registry.add(index_key(1));
+  add_expiry(registry, 100, 7, 4);    // near
+  add_expiry(registry, 200, 30, 4);   // mid
+  add_expiry(registry, 300, 90, 4);   // far
+
+  // Room for the index plus two whole expiries, and half of a third.
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 11, kNow);
+  EXPECT_TRUE(subscription.truncated);
+  EXPECT_EQ(subscription.expiries, 2u) << "the third expiry does not fit whole";
+  EXPECT_EQ(subscription.channels.size(), 9u) << "index + 4 + 4";
+  EXPECT_EQ(subscription.offered, 13u);
+
+  // And it is the *near* expiries that survived.
+  const auto contains = [&](const std::string& channel) {
+    return std::find(subscription.channels.begin(),
+                     subscription.channels.end(),
+                     channel) != subscription.channels.end();
+  };
+  EXPECT_TRUE(contains("ticker.BTC-E7-0-C.100ms"));
+  EXPECT_TRUE(contains("ticker.BTC-E30-0-C.100ms"));
+  EXPECT_FALSE(contains("ticker.BTC-E90-0-C.100ms"));
+}
+
+TEST(InstrumentRegistry, AFirstExpiryWiderThanTheCapIsTakenPartially) {
+  // Dropping every option because the front month is large would be worse than
+  // a partial front month.
+  InstrumentRegistry registry;
+  registry.add(index_key(1));
+  add_expiry(registry, 100, 7, 20);
+
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 6, kNow);
+  EXPECT_TRUE(subscription.truncated);
+  EXPECT_EQ(subscription.channels.size(), 6u);
+  EXPECT_EQ(subscription.channels[0], "deribit_price_index.btc_usd");
+}
+
+TEST(InstrumentRegistry, AnUntruncatedSubscriptionSaysSo) {
+  InstrumentRegistry registry;
+  registry.add(index_key(1));
+  add_expiry(registry, 100, 7, 3);
+
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 200, kNow);
+  EXPECT_FALSE(subscription.truncated);
+  EXPECT_EQ(subscription.expiries, 1u);
+  EXPECT_EQ(subscription.channels.size(), subscription.offered);
+}
+
+TEST(InstrumentRegistry, APerpetualIsNeverSubscribed) {
+  InstrumentRegistry registry;
+  registry.add(InstrumentKey{.symbol = "BTC-PERPETUAL",
+                             .id = 9,
+                             .kind = InstrumentKind::Perpetual,
+                             .price_exponent = -1,
+                             .expiry = Nanos{}});
+  registry.add(index_key(1));
+
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 50, kNow);
+  ASSERT_EQ(subscription.channels.size(), 1u);
+  EXPECT_EQ(subscription.channels[0], "deribit_price_index.btc_usd");
+  EXPECT_EQ(subscription.offered, 1u) << "it is not even offered";
+}
+
+TEST(InstrumentRegistry, AnAlreadyExpiredInstrumentIsNeverSubscribed) {
+  // The registry is only as current as the last reference_ingest run and
+  // routinely holds settled expiries. Because the order is nearest-first,
+  // those would otherwise consume the whole cap and be rejected wholesale by
+  // the venue -- which reads as "the subscribe half worked" rather than as
+  // stale reference data.
+  InstrumentRegistry registry;
+  registry.add(index_key(1));
+  registry.add(future_key(2, "BTC-DEAD", 0));
+  add_expiry(registry, 100, 0, 4);   // settled yesterday
+  add_expiry(registry, 200, 30, 4);  // live
+
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 200, kNow);
+  EXPECT_EQ(subscription.expired, 5u) << "one future and four options";
+  EXPECT_EQ(subscription.offered, 5u) << "index plus the live expiry";
+  EXPECT_EQ(subscription.channels.size(), 5u);
+  EXPECT_EQ(subscription.expiries, 1u);
+  for (const std::string& channel : subscription.channels) {
+    EXPECT_EQ(channel.find("DEAD"), std::string::npos);
+    EXPECT_EQ(channel.find("BTC-E0-"), std::string::npos);
+  }
+}
+
+TEST(InstrumentRegistry, TheIndexHasNoExpiryAndIsAlwaysLive) {
+  InstrumentRegistry registry;
+  registry.add(index_key(1));
+  const Subscription subscription =
+      registry.subscription_channels("100ms", 200, days(10000));
+  ASSERT_EQ(subscription.channels.size(), 1u);
+  EXPECT_EQ(subscription.expired, 0u);
+}
+
+TEST(InstrumentRegistry, FindResolvesATickIdBackToItsIdentity) {
+  InstrumentRegistry registry;
+  registry.add(option_key(555, "BTC-25SEP26-98000-C", 40));
+
+  const InstrumentKey* const key = registry.find(555);
+  ASSERT_NE(key, nullptr);
+  EXPECT_EQ(key->symbol, "BTC-25SEP26-98000-C");
+  EXPECT_EQ(key->price_exponent, -4);
+  EXPECT_EQ(registry.find(556), nullptr);
 }

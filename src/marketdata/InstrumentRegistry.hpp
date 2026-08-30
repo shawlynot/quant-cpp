@@ -39,13 +39,22 @@ inline constexpr std::string_view kIndexChannelPrefix = "deribit_price_index.";
 /// appending one fails the subscribe.
 std::string channel_for(const InstrumentKey& key, std::string_view interval);
 
+/// What one call to subscription_channels() decided.
+struct Subscription {
+  std::vector<std::string> channels;
+  std::size_t offered = 0;   ///< live channels the universe could have produced
+  std::size_t expired = 0;   ///< instruments skipped as already settled
+  std::size_t expiries = 0;  ///< option expiries included in full
+  bool truncated = false;
+};
+
 class InstrumentRegistry {
  public:
   /// Register an instrument under its security_master id.
   ///
-  /// Returns nullopt for a key with no id (`id == 0`) -- a symbol parsed
-  /// without a database row behind it has no identity to register under, and
-  /// silently inventing one is what the single-id rule exists to prevent.
+  /// Returns nullopt for a key with no id (`id == 0`) -- a symbol with no
+  /// database row behind it has no identity to register under, and silently
+  /// inventing one is what the single-id rule exists to prevent.
   /// Re-registering a symbol returns the existing id rather than duplicating.
   std::optional<InstrumentId> add(InstrumentKey key);
 
@@ -53,34 +62,43 @@ class InstrumentRegistry {
   std::optional<InstrumentId> by_symbol(std::string_view symbol) const;
 
   /// Resolve an inbound notification's channel to the instrument it carries.
+  /// This is why dispatch never has to re-parse `instrument_name` out of a
+  /// payload: the channel the frame arrived on already names the instrument.
   std::optional<InstrumentId> by_channel(std::string_view channel) const;
 
-  /// Every channel the gateway should subscribe to, in subscription order:
-  /// the spot index first, then dated futures, then options.
+  /// The channels to subscribe, in subscription order, capped at
+  /// `max_channels` -- one `public/subscribe` carries the lot, so the cap is
+  /// what keeps the universe inside the request rather than any batching.
   ///
-  /// Spot and the futures are tiny -- one channel plus under ten -- so they
-  /// survive the session's channel cap with room to spare, and spot is the
-  /// reference every option tick carries. Ordering them last would both leave
-  /// the first seconds of option ticks published with no index behind them
-  /// and put them at the end that a truncation discards.
+  /// Order is the index, then dated futures by expiry, then options grouped by
+  /// expiry with the nearest first. Options are admitted a *whole expiry at a
+  /// time*: a fitter wants complete front expiries, and an arbitrary slice
+  /// across every expiry would give it a fragment of each and a usable smile
+  /// for none. The single exception is a first expiry larger than the entire
+  /// cap, which is taken partially rather than dropping every option.
   ///
-  /// The perpetual is never included, whatever a stray row might say.
-  std::vector<std::string> subscription_channels(
-      std::string_view interval) const;
+  /// Anything already expired at `as_of` is skipped. The registry is only as
+  /// current as the last reference_ingest run, so it routinely holds expiries
+  /// that have since settled -- and because the order is nearest-first, those
+  /// dead instruments would otherwise consume the entire cap and the venue
+  /// would reject every one of them. `as_of` is a parameter rather than a call
+  /// to the clock so this is testable without waiting for an expiry to pass.
+  ///
+  /// Calling this also binds each channel to its instrument (see by_channel),
+  /// so the routing table and the subscription can never disagree.
+  Subscription subscription_channels(std::string_view interval,
+                                     std::size_t max_channels, Nanos as_of);
 
   std::vector<InstrumentId> ids_of_kind(InstrumentKind kind) const;
 
   std::size_t size() const { return m_keys.size(); }
   const std::vector<InstrumentKey>& keys() const { return m_keys; }
 
-  /// Record the channel an instrument was subscribed on, so inbound
-  /// notifications can be routed by name rather than by payload shape.
+ private:
   void bind_channel(std::string channel, InstrumentId id);
 
- private:
-  /// Insertion order, which `subscription_channels` and `ids_of_kind` rely on
-  /// for a deterministic subscribe sequence. `m_slot_by_id` is what turns an
-  /// id back into an entry, since the ids are sparse.
+  /// Insertion order, which `ids_of_kind` relies on. `m_slot_by_id` is what
+  /// turns an id back into an entry, since the ids are sparse.
   std::vector<InstrumentKey> m_keys;
   std::unordered_map<InstrumentId, std::size_t> m_slot_by_id;
   std::unordered_map<std::string, InstrumentId> m_by_symbol;

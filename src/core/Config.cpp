@@ -106,9 +106,25 @@ Config Config::from_env() {
 
   config.ws_host = read_env_or("DERIBIT_WS_HOST", std::move(config.ws_host));
   config.ws_port = read_env_or("DERIBIT_WS_PORT", std::move(config.ws_port));
+  config.ws_target =
+      read_env_or("DERIBIT_WS_TARGET", std::move(config.ws_target));
+  config.auth_target =
+      read_env_or("DERIBIT_AUTH_TARGET", std::move(config.auth_target));
   config.ticker_interval =
       read_env_or("DERIBIT_TICKER_INTERVAL", std::move(config.ticker_interval));
-  config.log_level = read_env_or("QUANT_LOG_LEVEL", std::move(config.log_level));
+
+  if (const auto cap = read_env("DERIBIT_MAX_CHANNELS")) {
+    std::size_t parsed = 0;
+    const auto [ptr, ec] =
+        std::from_chars(cap->data(), cap->data() + cap->size(), parsed);
+    if (ec != std::errc{} || ptr != cap->data() + cap->size() || parsed == 0) {
+      throw std::runtime_error("DERIBIT_MAX_CHANNELS is not a positive "
+                               "integer: " + *cap);
+    }
+    config.max_channels = parsed;
+  }
+  config.log_level =
+      read_env_or("QUANT_LOG_LEVEL", std::move(config.log_level));
 
   return config;
 }

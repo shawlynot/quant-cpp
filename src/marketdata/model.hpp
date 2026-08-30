@@ -1,26 +1,28 @@
 #pragma once
 
-// The POD tick type and symbol parsing for the Deribit market data gateway.
+// The POD tick type and the instrument identity it resolves through.
 //
 // One Tick carries every instrument: an option, a dated future and the spot
-// index all reduce to (id, exchange time, receive time, price). There is no
-// per-kind struct and no per-kind field, so nothing on the hot path is
-// permanently NaN because it belongs to a different instrument -- which is what
-// two structs, or one wide struct with an option-only half, both ended up
+// index all reduce to (id, exchange time, receive time, price, exponent).
+// There is no per-kind struct and no per-kind field, so nothing on the hot path
+// is permanently unset because it belongs to a different instrument -- which is
+// what two structs, or one wide struct with an option-only half, both ended up
 // doing.
 //
-// Tick is trivially copyable and fixed-size. Nothing here forces that today --
-// the queue in src/queue would tolerate a std::string member -- but a tick is
-// expected to end up in a Protobuf encoder or a shared-memory segment, and
-// staying a POD is what makes those a copy rather than a rewrite. Symbols
-// therefore live in the registry, keyed by instrument id, and never on the tick
-// itself; `kind` on the registry entry is what tells a consumer whether a given
-// price is an option's, a future's or the index's.
+// Tick is trivially copyable and fixed-size. Nothing here forces that today,
+// but a tick is expected to end up in a Protobuf encoder or a shared-memory
+// segment, and staying a POD is what makes those a copy rather than a rewrite.
+// Symbols therefore live in the registry, keyed by instrument id, and never on
+// the tick itself; `kind` on the registry entry is what tells a consumer
+// whether a given price is an option's, a future's or the index's.
+//
+// There is no symbol parser. Identity is Postgres's -- id, symbol, type and
+// tick size all arrive from security_master at startup -- so re-deriving any of
+// it from the symbol string would be a second source of truth for facts the
+// database already states.
 
 #include <chrono>
 #include <cstdint>
-#include <limits>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -31,27 +33,16 @@ namespace shawlynot::quant::marketdata {
 /// system. Stable, shared with the Python layer, and what travels in published
 /// messages, so a tick joins straight back to Postgres with no translation.
 ///
-/// The gateway deliberately keeps no dense id of its own alongside it. A second
-/// numbering would have to be built at load, mapped both ways, and kept in step
-/// on every chain roll -- and the only thing it bought was array indexing on a
-/// hot path that no longer indexes into anything (the tick store is gone; the
-/// ordering guard is a hash lookup). One id means one answer to "which
-/// instrument is this", in the gateway, on the wire, and in the database.
+/// It is a bigserial, so the live set is a sparse window up in the tens of
+/// thousands rather than a dense 0..N-1 range. That rules out indexing a flat
+/// array by it, which is why every registry lookup is a hash.
 using InstrumentId = std::int64_t;
 
 using Nanos = std::chrono::sys_time<std::chrono::nanoseconds>;
 
-/// Absent venue fields are NaN, never 0: `best_bid_price` is genuinely null
-/// when there are no bids, which is routine on far-OTM crypto strikes. A zero
-/// there silently becomes a bid of zero and poisons a fit, where a NaN
-/// propagates visibly and is filtered at the fitter's OTM/vega stage.
-inline constexpr double kNoValue = std::numeric_limits<double>::quiet_NaN();
-
-enum class OptionRight : std::uint8_t { Call, Put };
-
 /// Option, Future and Index are the whole subscribed universe. Perpetual is
 /// recognised but never ingested or subscribed -- it exists so that a stray row
-/// or symbol is classified rather than rejected.
+/// is classified rather than rejected.
 enum class InstrumentKind : std::uint8_t {
   Option,
   Future,
@@ -61,14 +52,20 @@ enum class InstrumentKind : std::uint8_t {
 };
 
 /// Identity, built once at registry load -- never constructed on the hot path.
+///
+/// Deliberately minimal: strike, right and base currency are not here because
+/// nothing in the ingest reads them, and a field nobody reads is a field that
+/// silently goes wrong. `expiry` earns its place only because the subscribe
+/// order is expiry-ascending (see InstrumentRegistry::subscription_channels).
 struct InstrumentKey {
-  std::string symbol;    ///< "BTC-27JUN25-100000-C" | "BTC-27JUN25" | "btc_usd"
-  std::string base_ccy;  ///< "BTC"
-  InstrumentId id = 0;   ///< 0 when parsed from a symbol alone: no identity yet
+  std::string symbol;   ///< "BTC-27JUN25-100000-C" | "BTC-27JUN25" | "btc_usd"
+  InstrumentId id = 0;  ///< 0 means no security_master row: no identity
   InstrumentKind kind = InstrumentKind::Unknown;
-  Nanos expiry{};                         ///< epoch for an index or perpetual
-  double strike = kNoValue;               ///< NaN unless kind == Option
-  OptionRight right = OptionRight::Call;  ///< meaningless unless kind == Option
+  /// Decimal exponent for this instrument's prices, derived from
+  /// instrument.tick_size. -4 for a 0.0001 option tick, -1 for a 2.5 future
+  /// tick, -2 for the index's 0.01.
+  std::int32_t price_exponent = 0;
+  Nanos expiry{};  ///< epoch for the index; a real date for options/futures
 };
 
 /// One price update, whatever the instrument.
@@ -78,32 +75,39 @@ struct InstrumentKey {
 /// differently but this is the field each one means by "what it traded at". The
 /// codec is the only place that distinction exists; past it, a tick is a tick.
 ///
-/// `id` resolves through the registry to the symbol and `kind`, so nothing that
-/// can be looked up is carried here. That keeps Tick 32 bytes and keeps the
-/// registry the single source of identity.
+/// The value is `price * 10^exponent`, exactly. The exponent comes from the
+/// instrument's tick size rather than from the frame, so two ticks for the same
+/// instrument are always directly comparable as integers -- which is the whole
+/// reason for carrying a scale rather than a double.
+///
+/// What is *not* normalized is the unit of account: an option's price is in
+/// coin and the index's is in USD. Only `kind` on the registry entry tells them
+/// apart, so a consumer that compares them without checking `kind` is comparing
+/// BTC to USD.
 struct Tick {
   InstrumentId id = 0;
   Nanos exchange_ts{};  ///< venue `timestamp` (ms), widened to ns
   Nanos recv_ts{};      ///< local receive stamp, for latency and staleness
-  double price = kNoValue;
+  std::int64_t price = 0;
+  std::int32_t exponent = 0;
 };
 
 static_assert(std::is_trivially_copyable_v<Tick>);
 
-/// Parse a Deribit instrument name into its identity.
-///
-/// Handles all four forms: `BTC-27JUN25-100000-C` (option), `BTC-27JUN25`
-/// (dated future), `btc_usd` (index), and `BTC-PERPETUAL` -- the last purely
-/// defensively, since the perpetual is filtered out at the Python ingest and
-/// should never appear.
-///
-/// Returns nullopt rather than throwing: a new listing with an unexpected shape
-/// should be logged and skipped, not crash the gateway.
-std::optional<InstrumentKey> parse_symbol(std::string_view symbol);
-
-std::string_view to_string(InstrumentKind kind);
-
-/// Deribit expiries are at 08:00 UTC on the named date.
-inline constexpr std::chrono::hours kDeribitExpiryHourUtc{8};
+constexpr std::string_view to_string(InstrumentKind kind) {
+  switch (kind) {
+    case InstrumentKind::Option:
+      return "option";
+    case InstrumentKind::Future:
+      return "future";
+    case InstrumentKind::Index:
+      return "index";
+    case InstrumentKind::Perpetual:
+      return "perpetual";
+    case InstrumentKind::Unknown:
+      break;
+  }
+  return "unknown";
+}
 
 }  // namespace shawlynot::quant::marketdata

@@ -8,11 +8,9 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(tests
     test_main.cpp
-    test_model.cpp
     test_ticker_codec.cpp
     test_instrument_registry.cpp
-    test_blocking_queue.cpp
-    test_deribit_session.cpp
+    test_instrument_repository.cpp
 )
 
 target_include_directories(tests PRIVATE ${CMAKE_SOURCE_DIR}/include)

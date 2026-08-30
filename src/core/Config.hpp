@@ -24,9 +24,15 @@ struct Config {
   std::string ws_host = "www.deribit.com";  ///< test.deribit.com for testnet
   std::string ws_port = "443";
   std::string ws_target = "/ws/api/v2";
+  /// A token cannot be minted over the WebSocket, so public/auth is the one
+  /// HTTPS call the gateway makes.
+  std::string auth_target = "/api/v2/public/auth";
   std::string client_id;
   std::string client_secret;              ///< never logged
   std::string ticker_interval = "100ms";  ///< raw | 100ms | agg2
+  /// Cap on a single public/subscribe. The universe goes out in one request,
+  /// so this is what keeps it a sane size -- there is no chunking behind it.
+  std::size_t max_channels = 200;
 
   // ── Postgres (startup only -- never on the hot path) ──
   std::string pg_host = "localhost";

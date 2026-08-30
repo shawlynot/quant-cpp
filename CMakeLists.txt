@@ -59,12 +59,11 @@ FetchContent_MakeAvailable(libpqxx)
 add_library(quant_marketdata STATIC
     src/core/Config.cpp
     src/core/Log.cpp
-    src/marketdata/model.cpp
     src/marketdata/TickerCodec.cpp
     src/marketdata/InstrumentRepository.cpp
     src/marketdata/InstrumentRegistry.cpp
-    src/marketdata/WebSocketTransport.cpp
-    src/marketdata/deribit.cpp
+    src/marketdata/Web.cpp
+    src/marketdata/Deribit.cpp
 )
 target_include_directories(quant_marketdata PUBLIC src include)
 target_link_libraries(quant_marketdata PUBLIC

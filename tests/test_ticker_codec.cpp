@@ -1,148 +1,126 @@
-#include <gtest/gtest.h>
+// Codec tests: captured Deribit frames in, Ticks out.
+//
+// The assertions are on the exact integer, not on a tolerance, because the
+// whole reason a tick carries an int plus an exponent is that the value is
+// exact. A test that accepted 68553.49999 would not be testing this design.
 
-#include <cmath>
+#include <gtest/gtest.h>
 
 #include "fixtures.hpp"
 #include "marketdata/TickerCodec.hpp"
 
 using namespace shawlynot::quant::marketdata;
-using shawlynot::quant::test::load_notification_channel;
 using shawlynot::quant::test::load_notification_data;
 
 namespace {
 
-constexpr InstrumentId kId = 90502;
+constexpr InstrumentId kId = 4242;
+constexpr Nanos kRecv{std::chrono::nanoseconds{1'787'170'728'500'000'000}};
 
-Nanos recv_stamp() { return Nanos{std::chrono::seconds{1787170730}}; }
+// The exponents the repository derives from security_master.tick_size for the
+// three instrument types actually in the database.
+constexpr std::int32_t kOptionExponent = -4;  // tick_size 0.0001
+constexpr std::int32_t kFutureExponent = -1;  // tick_size 2.5
+constexpr std::int32_t kIndexExponent = -2;   // tick_size 0.01
 
 }  // namespace
 
-TEST(TickerCodec, TakesLastPriceAsThePriceOnAnOptionFrame) {
-  // A ticker frame carries a dozen prices; `last_price` is the one a Tick
-  // means. The rest -- bids, asks, mark, the IVs, the greeks -- are read by
-  // nothing and decoded by nothing.
-  const auto tick = TickerCodec::decode_ticker(
-      load_notification_data("ticker_option.json"), kId, recv_stamp());
-
-  ASSERT_TRUE(tick.has_value());
-  EXPECT_EQ(tick->id, kId);
-  EXPECT_EQ(tick->recv_ts, recv_stamp());
-  EXPECT_DOUBLE_EQ(tick->price, 0.001);
+TEST(TickerCodec, ScalesAnOptionPremiumByItsOwnTickExponent) {
+  const auto decoded = TickerCodec::decode_ticker(
+      load_notification_data("ticker_option.json"), kId, kOptionExponent,
+      kRecv);
+  ASSERT_TRUE(decoded.has_value());
+  // last_price 0.001 BTC at 1e-4 granularity is exactly 10 ticks.
+  EXPECT_EQ(decoded->tick.price, 10) << "0.001 BTC should scale to 10 at 1e-4";
+  EXPECT_EQ(decoded->tick.exponent, kOptionExponent);
+  EXPECT_EQ(decoded->tick.id, kId);
+  EXPECT_FALSE(decoded->precision_lost);
 }
 
-TEST(TickerCodec, TakesLastPriceAsThePriceOnAFutureFrame) {
-  // Same codec, same field: a future differs from an option only in which
-  // instrument its id resolves to.
-  const auto tick = TickerCodec::decode_ticker(
-      load_notification_data("ticker_future.json"), kId, recv_stamp());
-
-  ASSERT_TRUE(tick.has_value());
-  EXPECT_DOUBLE_EQ(tick->price, 68530.0);
+TEST(TickerCodec, ScalesAFuturePriceByItsOwnTickExponent) {
+  const auto decoded = TickerCodec::decode_ticker(
+      load_notification_data("ticker_future.json"), kId, kFutureExponent,
+      kRecv);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->tick.price, 685300) << "68530.0 at 1e-1";
+  EXPECT_EQ(decoded->tick.exponent, kFutureExponent);
+  EXPECT_FALSE(decoded->precision_lost);
 }
 
-TEST(TickerCodec, WidensMillisecondTimestampToNanoseconds) {
-  const auto tick = TickerCodec::decode_ticker(
-      load_notification_data("ticker_option.json"), kId, recv_stamp());
-
-  ASSERT_TRUE(tick.has_value());
-  const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(
-      tick->exchange_ts.time_since_epoch());
-  EXPECT_EQ(millis.count(), 1787170728407);
-  // Widened, not truncated: the ns representation must hold the exact ms.
-  EXPECT_EQ(tick->exchange_ts.time_since_epoch().count(),
-            1787170728407LL * 1'000'000);
+TEST(TickerCodec, IndexReadsPriceRatherThanLastPrice) {
+  const auto decoded = TickerCodec::decode_index(
+      load_notification_data("price_index.json"), kId, kIndexExponent, kRecv);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->tick.price, 6855350) << "68553.5 at 1e-2";
+  EXPECT_EQ(decoded->tick.exponent, kIndexExponent);
 }
 
-TEST(TickerCodec, RejectsAFrameWithNoLastPrice) {
-  // Routine, not malformed: a far-OTM strike that has never traded sends
-  // `last_price: null` on every update. A Tick whose one payload field is NaN
-  // carries nothing, so it is not produced at all -- otherwise every consumer
-  // reimplements this guard.
+TEST(TickerCodec, TheIndexPayloadHasNoLastPriceSoTheTickerEntryPointRejectsIt) {
+  // The two channels carry the price under different names. Choosing the entry
+  // point by channel rather than by payload shape is what keeps that from
+  // being a guess -- this is the failure that guess would produce.
+  EXPECT_FALSE(TickerCodec::decode_ticker(
+                   load_notification_data("price_index.json"), kId,
+                   kIndexExponent, kRecv)
+                   .has_value());
+}
+
+TEST(TickerCodec, VenueTimestampIsMillisecondsWidenedToNanoseconds) {
+  const auto decoded = TickerCodec::decode_index(
+      load_notification_data("price_index.json"), kId, kIndexExponent, kRecv);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->tick.exchange_ts,
+            Nanos{std::chrono::milliseconds{1787170728407}});
+  EXPECT_EQ(decoded->tick.recv_ts, kRecv);
+}
+
+TEST(TickerCodec, AnUntradedStrikeSendsNullLastPriceAndDecodesToNothing) {
+  // Routine on a far-OTM strike, and the reason this is not a decode failure:
+  // folding it into the failure counter would make that counter useless.
   boost::json::object data = load_notification_data("ticker_option.json");
   data["last_price"] = nullptr;
-
-  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, recv_stamp()).has_value())
-      << "an explicit null price must not decode";
+  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, kOptionExponent, kRecv)
+                   .has_value());
 
   data.erase("last_price");
-  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, recv_stamp()).has_value())
-      << "an absent price must not decode";
+  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, kOptionExponent, kRecv)
+                   .has_value());
 }
 
-TEST(TickerCodec, RejectsPayloadWithoutTimestamp) {
+TEST(TickerCodec, APayloadWithNoTimestampIsNotATick) {
   boost::json::object data = load_notification_data("ticker_option.json");
   data.erase("timestamp");
-
-  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, recv_stamp()).has_value());
+  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, kOptionExponent, kRecv)
+                   .has_value());
 }
 
-TEST(TickerCodec, IgnoresEveryOtherFieldOnTheFrame) {
-  // The guarantee that makes one Tick honest: nothing outside `timestamp` and
-  // the price field can change the decode. Gutting the frame of quotes, IVs,
-  // greeks and state leaves the tick identical.
-  boost::json::object full = load_notification_data("ticker_option.json");
-  boost::json::object bare{{"timestamp", full.at("timestamp")},
-                           {"last_price", full.at("last_price")}};
-
-  const auto from_full = TickerCodec::decode_ticker(full, kId, recv_stamp());
-  const auto from_bare = TickerCodec::decode_ticker(bare, kId, recv_stamp());
-
-  ASSERT_TRUE(from_full.has_value());
-  ASSERT_TRUE(from_bare.has_value());
-  EXPECT_EQ(from_full->exchange_ts, from_bare->exchange_ts);
-  EXPECT_DOUBLE_EQ(from_full->price, from_bare->price);
+TEST(TickerCodec, APriceFinerThanTheTickIsRoundedAndFlagged) {
+  // Deribit's tick_size_steps shrinks the tick in low price bands while
+  // security_master stores only the base tick size, so a premium can arrive
+  // with more decimals than the exponent can hold. It must round visibly
+  // rather than silently.
+  boost::json::object data = load_notification_data("ticker_option.json");
+  data["last_price"] = 0.00105;
+  const auto decoded =
+      TickerCodec::decode_ticker(data, kId, kOptionExponent, kRecv);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_TRUE(decoded->precision_lost);
+  EXPECT_EQ(decoded->tick.price, 11) << "0.00105 at 1e-4 rounds to 11";
 }
 
-TEST(TickerCodec, ReadsInstrumentName) {
-  EXPECT_EQ(TickerCodec::instrument_name(
-                load_notification_data("ticker_option.json")),
-            "BTC-25SEP26-98000-C");
-  EXPECT_EQ(TickerCodec::instrument_name(
-                load_notification_data("ticker_future.json")),
-            "BTC-20AUG26");
+TEST(TickerCodec, AnIntegerJsonPriceIsAcceptedAlongsideADouble) {
+  // Boost.JSON types 68530 and 68530.0 differently; the venue writes whichever
+  // it likes and the codec must not care.
+  boost::json::object data = load_notification_data("ticker_future.json");
+  data["last_price"] = 68530;
+  const auto decoded =
+      TickerCodec::decode_ticker(data, kId, kFutureExponent, kRecv);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(decoded->tick.price, 685300);
 }
 
-TEST(IndexCodec, TakesPriceFromTheIndexPayloadsOwnField) {
-  // The index channel has a three-field payload and calls its price `price`,
-  // not `last_price`. That one key is the whole difference between the two
-  // codec entry points.
-  const auto tick = TickerCodec::decode_index(
-      load_notification_data("price_index.json"), kId, recv_stamp());
-
-  ASSERT_TRUE(tick.has_value());
-  EXPECT_EQ(tick->id, kId);
-  EXPECT_DOUBLE_EQ(tick->price, 68553.5);
-  EXPECT_EQ(tick->exchange_ts.time_since_epoch().count(),
-            1787170728407LL * 1'000'000);
-  EXPECT_EQ(tick->recv_ts, recv_stamp());
-}
-
-TEST(IndexCodec, RejectsPayloadWithoutAPrice) {
-  boost::json::object data = load_notification_data("price_index.json");
-  data.erase("price");
-
-  EXPECT_FALSE(TickerCodec::decode_index(data, kId, recv_stamp()).has_value());
-}
-
-TEST(IndexCodec, DoesNotFallBackToLastPrice) {
-  // The entry points must not be interchangeable: an index frame has no
-  // `last_price` and a ticker frame's `price` means nothing.
-  boost::json::object index = load_notification_data("price_index.json");
-  EXPECT_FALSE(
-      TickerCodec::decode_ticker(index, kId, recv_stamp()).has_value());
-
-  boost::json::object ticker = load_notification_data("ticker_option.json");
-  EXPECT_FALSE(
-      TickerCodec::decode_index(ticker, kId, recv_stamp()).has_value());
-}
-
-TEST(IndexCodec, ChannelIsRoutedByNameNotPayloadShape) {
-  // With one Tick type the payload shape is the *only* thing that could
-  // otherwise distinguish the channels, and it must not be relied on.
-  EXPECT_EQ(load_notification_channel("price_index.json"),
-            "deribit_price_index.btc_usd");
-  EXPECT_EQ(load_notification_channel("ticker_option.json"),
-            "ticker.BTC-25SEP26-98000-C.100ms");
-  EXPECT_EQ(load_notification_channel("ticker_future.json"),
-            "ticker.BTC-20AUG26.100ms");
+TEST(TickerCodec, ANonsensicalExponentIsRejectedRatherThanIndexedOutOfRange) {
+  boost::json::object data = load_notification_data("ticker_future.json");
+  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, -19, kRecv).has_value());
+  EXPECT_FALSE(TickerCodec::decode_ticker(data, kId, 1, kRecv).has_value());
 }

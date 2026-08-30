@@ -13,8 +13,10 @@
 // missing expiry in the surface. Detecting that drift is the job of a separate
 // reconciliation process, not of the gateway's startup path.
 
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "marketdata/model.hpp"
@@ -32,16 +34,30 @@ struct InstrumentRow {
   /// This is *not* Deribit's `instrument_type`, which means the settlement
   /// convention ("linear"/"reversed").
   std::string instrument_type;
-  std::optional<std::string> option_type;  ///< 'call' | 'put', option rows only
-  std::optional<double> strike;            ///< option rows only
-  std::optional<Nanos> expiration;         ///< option and future rows
+  /// instrument.tick_size as text, exactly as Postgres rendered the numeric.
+  /// Text and not a double on purpose -- see exponent_from_tick_size.
+  std::string tick_size;
+  std::optional<Nanos> expiration;  ///< option and future rows
 };
+
+/// The decimal exponent implied by a tick size, i.e. minus the number of
+/// decimal places it is written with, ignoring trailing zeros.
+///
+///   "0.00010000" -> -4      "2.50000000" -> -1
+///   "0.01000000" -> -2      "5"          ->  0
+///
+/// This is pure string work by design. `tick_size` is numeric(20,8) and the
+/// whole reason a tick carries an integer plus an exponent is to avoid binary
+/// floating point; routing the scale itself through a double would put the
+/// rounding straight back in. Returns nullopt for anything that is not a plain
+/// decimal literal.
+std::optional<std::int32_t> exponent_from_tick_size(std::string_view tick_size);
 
 /// Map a database row onto gateway identity.
 ///
 /// Returns nullopt for a row that cannot be made sense of -- an unknown
-/// instrument_type, an option missing its strike or right, a future missing its
-/// expiry. A bad row is logged and skipped rather than aborting the load.
+/// instrument_type, a tick size that will not parse, an option or future with
+/// no expiry. A bad row is logged and skipped rather than aborting the load.
 std::optional<InstrumentKey> to_instrument_key(const InstrumentRow& row);
 
 /// The startup query. Exposed so a test can assert the shape it expects, and so
