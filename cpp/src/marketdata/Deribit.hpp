@@ -75,7 +75,7 @@ class DeribitIngest {
   boost::asio::awaitable<std::string> authenticate();
   boost::asio::awaitable<void> subscribe(WebSocketSession& session,
                                          const std::string& access_token);
-  void dispatch(std::string_view frame);
+  void read_frame(std::string_view frame);
   void handle_notification(const boost::json::object& params);
 
   boost::asio::any_io_executor m_executor;

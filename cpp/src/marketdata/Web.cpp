@@ -22,7 +22,6 @@ namespace beast = boost::beast;
 namespace http = boost::beast::http;
 namespace websocket = boost::beast::websocket;
 
-using asio::use_awaitable;
 using tcp = asio::ip::tcp;
 
 /// Connect and TLS timeout. The websocket layer installs its own policy once
@@ -50,18 +49,18 @@ asio::awaitable<void> tls_connect(tcp::resolver& resolver,
                                   beast::ssl_stream<beast::tcp_stream>& stream,
                                   const std::string& host,
                                   const std::string& port) {
-  const auto endpoints = co_await resolver.async_resolve(host, port,
-                                                         use_awaitable);
+  const auto endpoints =
+      co_await resolver.async_resolve(host, port, asio::use_awaitable);
 
   // tcp_stream carries its own timeout timer; a plain socket would need a
   // separate steady_timer and cancellation logic for the same guarantee.
   beast::get_lowest_layer(stream).expires_after(kHandshakeTimeout);
   co_await beast::get_lowest_layer(stream).async_connect(endpoints,
-                                                         use_awaitable);
+                                                         asio::use_awaitable);
 
   set_sni(stream, host);
   co_await stream.async_handshake(asio::ssl::stream_base::client,
-                                  use_awaitable);
+                                  asio::use_awaitable);
 }
 
 }  // namespace
@@ -93,10 +92,10 @@ asio::awaitable<boost::json::value> HttpSession::post(std::string host,
   request.prepare_payload();
 
   beast::get_lowest_layer(m_stream).expires_after(kHandshakeTimeout);
-  co_await http::async_write(m_stream, request, use_awaitable);
+  co_await http::async_write(m_stream, request, asio::use_awaitable);
 
   http::response<http::string_body> response;
-  co_await http::async_read(m_stream, m_buffer, response, use_awaitable);
+  co_await http::async_read(m_stream, m_buffer, response, asio::use_awaitable);
 
   if (response.result() != http::status::ok) {
     // The body may echo the request, so it is not reproduced here: this call
@@ -116,15 +115,16 @@ asio::awaitable<boost::json::value> HttpSession::post(std::string host,
 asio::awaitable<void> HttpSession::close() {
   boost::system::error_code ec;
   co_await m_stream.async_shutdown(
-      asio::redirect_error(use_awaitable, ec));  // discarded on purpose
+      asio::redirect_error(asio::use_awaitable, ec));  // discarded on purpose
   beast::get_lowest_layer(m_stream).close();
   co_return;
 }
 
 // ── WebSocket ───────────────────────────────────────────────────────
 
-asio::awaitable<WebSocketSession> WebSocketClient::connect(
-    std::string host, std::string port, std::string target) {
+asio::awaitable<WebSocketSession> WebSocketClient::connect(std::string host,
+                                                           std::string port,
+                                                           std::string target) {
   WebSocketSession::Stream stream{m_executor, m_tls};
   co_await tls_connect(m_resolver, stream.next_layer(), host, port);
 
@@ -135,19 +135,19 @@ asio::awaitable<WebSocketSession> WebSocketClient::connect(
   stream.set_option(
       websocket::stream_base::timeout::suggested(beast::role_type::client));
 
-  co_await stream.async_handshake(host, target, use_awaitable);
+  co_await stream.async_handshake(host, target, asio::use_awaitable);
   co_return WebSocketSession{std::move(stream)};
 }
 
 asio::awaitable<void> WebSocketSession::send(std::string_view text) {
   m_stream.text(true);
-  co_await m_stream.async_write(asio::buffer(text), use_awaitable);
+  co_await m_stream.async_write(asio::buffer(text), asio::use_awaitable);
   co_return;
 }
 
 asio::awaitable<std::string> WebSocketSession::read() {
   m_buffer.clear();
-  co_await m_stream.async_read(m_buffer, use_awaitable);
+  co_await m_stream.async_read(m_buffer, asio::use_awaitable);
   co_return beast::buffers_to_string(m_buffer.data());
 }
 

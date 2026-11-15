@@ -77,16 +77,13 @@ std::vector<InstrumentId> InstrumentRegistry::ids_of_kind(
   return ids;
 }
 
+bool InstrumentRegistry::is_live(const InstrumentKey& key, Nanos as_of) {
+  return key.kind == InstrumentKind::Index || key.expiry > as_of;
+}
+
 Subscription InstrumentRegistry::subscription_channels(
     std::string_view interval, std::size_t max_channels, Nanos as_of) {
   Subscription result;
-
-  // A settled instrument is not subscribable, and the venue rejects it rather
-  // than erroring the whole request -- so an unfiltered universe silently
-  // shrinks to whatever happened to still be alive.
-  const auto is_live = [&](const InstrumentKey& key) {
-    return key.kind == InstrumentKind::Index || key.expiry > as_of;
-  };
 
   // Emit one instrument's channel, binding it for inbound routing.
   const auto emit = [&](const InstrumentKey& key) {
@@ -106,7 +103,7 @@ Subscription InstrumentRegistry::subscription_channels(
         key.kind != InstrumentKind::Index) {
       continue;
     }
-    if (is_live(key)) {
+    if (is_live(key, as_of)) {
       ++result.offered;
     } else {
       ++result.expired;
@@ -126,7 +123,7 @@ Subscription InstrumentRegistry::subscription_channels(
   // never what a cap has to cut.
   std::vector<const InstrumentKey*> futures;
   for (const InstrumentKey& key : m_keys) {
-    if (key.kind == InstrumentKind::Future && is_live(key)) {
+    if (key.kind == InstrumentKind::Future && is_live(key, as_of)) {
       futures.push_back(&key);
     }
   }
@@ -142,7 +139,7 @@ Subscription InstrumentRegistry::subscription_channels(
   // std::map keeps the groups in ascending expiry order for free.
   std::map<Nanos, std::vector<const InstrumentKey*>> options_by_expiry;
   for (const InstrumentKey& key : m_keys) {
-    if (key.kind == InstrumentKind::Option && is_live(key)) {
+    if (key.kind == InstrumentKind::Option && is_live(key, as_of)) {
       options_by_expiry[key.expiry].push_back(&key);
     }
   }

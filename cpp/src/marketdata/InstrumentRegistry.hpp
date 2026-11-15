@@ -97,6 +97,12 @@ class InstrumentRegistry {
  private:
   void bind_channel(std::string channel, InstrumentId id);
 
+  /// Whether an instrument is still subscribable at `as_of`. A settled
+  /// instrument is not, and the venue rejects it rather than erroring the whole
+  /// request -- so an unfiltered universe silently shrinks to whatever happened
+  /// to still be alive. The index never settles.
+  static bool is_live(const InstrumentKey& key, Nanos as_of);
+
   /// Insertion order, which `ids_of_kind` relies on. `m_slot_by_id` is what
   /// turns an id back into an entry, since the ids are sparse.
   std::vector<InstrumentKey> m_keys;

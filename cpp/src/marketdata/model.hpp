@@ -53,10 +53,6 @@ enum class InstrumentKind : std::uint8_t {
 
 /// Identity, built once at registry load -- never constructed on the hot path.
 ///
-/// Deliberately minimal: strike, right and base currency are not here because
-/// nothing in the ingest reads them, and a field nobody reads is a field that
-/// silently goes wrong. `expiry` earns its place only because the subscribe
-/// order is expiry-ascending (see InstrumentRegistry::subscription_channels).
 struct InstrumentKey {
   std::string symbol;   ///< "BTC-27JUN25-100000-C" | "BTC-27JUN25" | "btc_usd"
   InstrumentId id = 0;  ///< 0 means no security_master row: no identity

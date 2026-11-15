@@ -22,12 +22,6 @@ class ITickSink {
   virtual ~ITickSink() = default;
 
   virtual void on_tick(const Tick& tick) = 0;
-
-  /// The feed's health, published rather than inferred: a quiet channel is
-  /// indistinguishable from a broken one on payload alone. On STALE a
-  /// consumer should hold last-good rather than republish garbage.
-  enum class FeedState { Live, Stale };
-  virtual void on_feed_state(FeedState /*state*/) {}
 };
 
 }  // namespace shawlynot::quant::marketdata

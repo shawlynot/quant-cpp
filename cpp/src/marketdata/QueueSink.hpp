@@ -8,7 +8,6 @@
 // and stays inline; a blocking write on the read loop is what delays a
 // test_request reply and gets the connection dropped.
 
-#include <atomic>
 #include <functional>
 #include <thread>
 
@@ -43,14 +42,6 @@ class QueueSink : public ITickSink {
 
   void on_tick(const Tick& tick) override { m_queue.push(tick); }
 
-  void on_feed_state(FeedState state) override {
-    m_feed_state.store(state, std::memory_order_relaxed);
-  }
-
-  FeedState feed_state() const {
-    return m_feed_state.load(std::memory_order_relaxed);
-  }
-
   /// Non-zero and growing means the consumer needs optimizing.
   std::uint64_t dropped() const { return m_queue.dropped(); }
 
@@ -67,7 +58,6 @@ class QueueSink : public ITickSink {
   queue::BlockingQueue<Tick> m_queue;
   std::thread m_consumer;
   TickHandler m_on_tick;
-  std::atomic<FeedState> m_feed_state{FeedState::Stale};
 };
 
 }  // namespace shawlynot::quant::marketdata

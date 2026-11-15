@@ -1,7 +1,5 @@
 """Thin async client for Deribit's public REST API."""
 
-from __future__ import annotations
-
 from types import TracebackType
 from typing import Any
 
@@ -44,7 +42,7 @@ class DeribitClient:
         kind: str = "option",
         expired: bool = False,
     ) -> list[dict[str, Any]]:
-        """`GET /public/get_instruments` — instrument reference data."""
+        """`GET /public/get_instruments` — instrment reference data."""
         result: list[dict[str, Any]] = await self._get(
             "get_instruments",
             {"currency": currency, "kind": kind, "expired": str(expired).lower()},
@@ -56,4 +54,4 @@ class DeribitAPIError(RuntimeError):
     def __init__(self, method: str, error: dict[str, Any]) -> None:
         super().__init__(f"Deribit API error calling {method}: {error}")
         self.method = method
-        self.error = error
+        self.errr = error

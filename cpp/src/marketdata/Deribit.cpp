@@ -1,12 +1,12 @@
 #include "marketdata/Deribit.hpp"
 
+#include <algorithm>
 #include <boost/asio/error.hpp>
 #include <boost/json/parse.hpp>
 #include <boost/json/serialize.hpp>
-#include <algorithm>
+#include <boost/system/system_error.hpp>
 #include <chrono>
 #include <exception>
-#include <boost/system/system_error.hpp>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -73,8 +73,6 @@ asio::awaitable<std::string> DeribitIngest::authenticate() {
   HttpClient client{m_executor, m_tls};
   HttpSession session = co_await client.connect(m_config.host, m_config.port);
 
-  // Built and serialized in one expression: this object must not survive to be
-  // caught in an exception message or a frame dump.
   std::string body = json::serialize(jsonrpc_request(
       m_next_request_id++, "public/auth",
       json::object{
@@ -87,9 +85,8 @@ asio::awaitable<std::string> DeribitIngest::authenticate() {
           {"scope", "connection"},
       }));
 
-  json::value response = co_await session.post(m_config.host,
-                                               m_config.auth_target,
-                                               std::move(body));
+  json::value response = co_await session.post(
+      m_config.host, m_config.auth_target, std::move(body));
   co_await session.close();
 
   const json::object* const result = object_at(response, "result");
@@ -153,7 +150,7 @@ asio::awaitable<void> DeribitIngest::subscribe(
   // arriving for the earlier channels in the same request, so they are
   // dispatched rather than discarded -- the response is not necessarily the
   // next frame on the wire.
-  for (;;) {
+  while (true) {
     const std::string frame = co_await session.read();
     const json::value parsed = json::parse(frame);
     const json::object* const object = parsed.if_object();
@@ -162,7 +159,7 @@ asio::awaitable<void> DeribitIngest::subscribe(
     }
     const json::value* const id = object->if_contains("id");
     if (id == nullptr || id->to_number<std::uint64_t>() != request_id) {
-      dispatch(frame);
+      read_frame(frame);
       continue;
     }
 
@@ -232,10 +229,9 @@ void DeribitIngest::handle_notification(const json::object& params) {
   // would silently pick the wrong one the first time a payload changed.
   const bool is_index = channel.starts_with(kIndexChannelPrefix);
   const auto decoded =
-      is_index ? TickerCodec::decode_index(*data, *id, key->price_exponent,
-                                           now())
-               : TickerCodec::decode_ticker(*data, *id, key->price_exponent,
-                                            now());
+      is_index
+          ? TickerCodec::decode_index(*data, *id, key->price_exponent, now())
+          : TickerCodec::decode_ticker(*data, *id, key->price_exponent, now());
   if (!decoded) {
     ++m_unpriced;
     return;
@@ -247,7 +243,7 @@ void DeribitIngest::handle_notification(const json::object& params) {
   m_sink.on_tick(decoded->tick);
 }
 
-void DeribitIngest::dispatch(std::string_view frame) {
+void DeribitIngest::read_frame(std::string_view frame) {
   // One malformed frame must never kill the read loop, so every failure here
   // is counted and dropped rather than propagated.
   json::value parsed;
@@ -290,15 +286,14 @@ asio::awaitable<void> DeribitIngest::run() {
                  m_config.ws_target);
 
     co_await subscribe(session, access_token);
-    m_sink.on_feed_state(ITickSink::FeedState::Live);
 
-    for (;;) {
-      dispatch(co_await session.read());
+    while (true) {
+      read_frame(co_await session.read());
     }
   } catch (const boost::system::system_error& error) {
     // A cancellation is the shutdown path, not a fault: the signal handler
     // cancels this coroutine precisely so it unwinds through here and gets to
-    // report its totals and tell the sink the feed is going away.
+    // report its totals.
     if (error.code() == asio::error::operation_aborted) {
       spdlog::info("ingest cancelled");
     } else {
@@ -310,7 +305,6 @@ asio::awaitable<void> DeribitIngest::run() {
     spdlog::error("ingest stopped: {}", error.what());
   }
 
-  m_sink.on_feed_state(ITickSink::FeedState::Stale);
   spdlog::info(
       "ingest totals: {} tick(s), {} unpriced, {} unrouted, {} decode "
       "failure(s), {} rounded price(s)",

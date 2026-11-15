@@ -57,10 +57,6 @@ class ConsoleSink : public ITickSink {
                  tick.id, format_scaled(tick.price, tick.exponent));
   }
 
-  void on_feed_state(FeedState state) override {
-    spdlog::info("feed state: {}", state == FeedState::Live ? "LIVE" : "STALE");
-  }
-
  private:
   std::shared_ptr<const InstrumentRegistry> m_registry;
 };
